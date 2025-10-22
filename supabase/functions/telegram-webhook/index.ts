@@ -192,6 +192,39 @@ serve(async (req) => {
         return success()
       }
       
+      // Обработка очистки статистики за сегодня
+      if (data === 'clear_today_stats') {
+        const today = new Date().toISOString().split('T')[0]
+        const { error } = await supabase
+          .from('meals')
+          .delete()
+          .eq('user_id', userId)
+          .gte('created_at', `${today}T00:00:00`)
+          .lte('created_at', `${today}T23:59:59`)
+        
+        if (error) {
+          await sendMessage(chatId, '❌ Ошибка при очистке статистики')
+        } else {
+          await sendMessageWithKeyboard(chatId, '🗑️ Статистика за сегодня очищена!\n\nТеперь можете начать день с чистого листа.', getMainKeyboard())
+        }
+        return success()
+      }
+      
+      // Обработка очистки всей статистики
+      if (data === 'clear_all_stats') {
+        const { error } = await supabase
+          .from('meals')
+          .delete()
+          .eq('user_id', userId)
+        
+        if (error) {
+          await sendMessage(chatId, '❌ Ошибка при очистке статистики')
+        } else {
+          await sendMessageWithKeyboard(chatId, '🗑️ Вся статистика питания очищена!\n\nВы можете начать отслеживание заново.', getMainKeyboard())
+        }
+        return success()
+      }
+      
       return success()
     }
     
@@ -270,7 +303,25 @@ serve(async (req) => {
         const user = await getUser(userId)
         if (user) {
           const paramsText = getUserParamsText(user)
-          await sendMessageWithKeyboard(chatId, paramsText, getMainKeyboard())
+          
+          // Добавляем инлайн-кнопки для дополнительных действий
+          const inlineKeyboard = {
+            inline_keyboard: [[
+              { text: '🗑️ Очистить статистику за сегодня', callback_data: 'clear_today_stats' },
+            ], [
+              { text: '🗑️ Очистить всю статистику', callback_data: 'clear_all_stats' }
+            ]]
+          }
+          
+          await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: chatId,
+              text: paramsText,
+              reply_markup: inlineKeyboard
+            })
+          })
         } else {
           await sendMessage(chatId, '❌ Сначала используйте /start')
         }
@@ -599,8 +650,23 @@ serve(async (req) => {
                               (text.toLowerCase().includes('похудеть') && text.toLowerCase().includes('вес')) ||
                               (text.match(/\d+\s*(см|м|метр)/i) && text.match(/\d+\s*кг/i))
           
+          // Проверяем, это критика/обсуждение целей (продолжение диалога)
+          const isGoalDiscussion = !isUserParams && (
+                                   text.toLowerCase().includes('много') ||
+                                   text.toLowerCase().includes('мало') ||
+                                   text.toLowerCase().includes('высокий') ||
+                                   text.toLowerCase().includes('низкий') ||
+                                   text.toLowerCase().includes('пересмотр')
+                                  ) && (
+                                   text.toLowerCase().includes('калори') ||
+                                   text.toLowerCase().includes('белк') ||
+                                   text.toLowerCase().includes('углевод') ||
+                                   text.toLowerCase().includes('жир') ||
+                                   text.toLowerCase().includes('кбжу')
+                                  )
+          
           // Проверяем, это запрос на совет или описание еды
-          const isAdviceRequest = !isUserParams && (
+          const isAdviceRequest = !isUserParams && !isGoalDiscussion && (
                                  text.toLowerCase().includes('что') || 
                                  text.toLowerCase().includes('хочу') ||
                                  text.toLowerCase().includes('можно') ||
@@ -619,7 +685,23 @@ serve(async (req) => {
             await sendMessage(chatId, '📝 Обновляю ваши параметры и цели...')
             const result = await updateUserParams(userId, text)
             await sendMessageWithKeyboard(chatId, result, getMainKeyboard())
-          } else           if (isAdviceRequest) {
+          } else if (isGoalDiscussion) {
+            // Это обсуждение целей - используем контекст
+            await sendMessage(chatId, '🤔 Анализирую ваш запрос и корректирую цели...')
+            
+            // Сохраняем критику пользователя в контекст
+            await addToContext(userId, 'user', text)
+            
+            const advice = await getSmartAdvice(userId, text)
+            
+            // Извлекаем и обновляем цели из ответа
+            await extractAndUpdateGoals(userId, advice)
+            
+            // Сохраняем ответ бота в контекст
+            await addToContext(userId, 'assistant', advice)
+            
+            await sendMessageWithKeyboard(chatId, advice, getMainKeyboard())
+          } else if (isAdviceRequest) {
             // Это запрос на совет - даем рекомендации
             await sendMessage(chatId, '🤔 Анализирую ваш рацион и подбираю рекомендации...')
             
@@ -1554,6 +1636,35 @@ function calculateNutritionGoals(params: any) {
   return { calories, protein, carbs, fat }
 }
 
+// Функция для извлечения и обновления целей из ответа GPT
+async function extractAndUpdateGoals(userId: number, advice: string) {
+  try {
+    // Ищем новые цели в ответе
+    const caloriesMatch = advice.match(/🔥 Калории:\s*(\d+)/i)
+    const proteinMatch = advice.match(/🥩 Белки:\s*(\d+)/i)
+    const carbsMatch = advice.match(/🍞 Углеводы:\s*(\d+)/i)
+    const fatMatch = advice.match(/🥑 Жиры:\s*(\d+)/i)
+    
+    if (caloriesMatch || proteinMatch || carbsMatch || fatMatch) {
+      const updates: any = {}
+      
+      if (caloriesMatch) updates.calories_goal = parseInt(caloriesMatch[1])
+      if (proteinMatch) updates.protein_goal = parseInt(proteinMatch[1])
+      if (carbsMatch) updates.carbs_goal = parseInt(carbsMatch[1])
+      if (fatMatch) updates.fat_goal = parseInt(fatMatch[1])
+      
+      await supabase
+        .from('users')
+        .update(updates)
+        .eq('user_id', userId)
+      
+      console.log(`Updated goals for user ${userId}:`, updates)
+    }
+  } catch (error) {
+    console.error('Extract goals error:', error)
+  }
+}
+
 async function getSmartAdvice(userId: number, question: string) {
   try {
     const { data: user } = await supabase
@@ -1611,27 +1722,29 @@ ${userInfo}
 
 ВАЖНО: 
 - Учитывай контекст предыдущих сообщений
-- Если пользователь критикует предложенные ранее цели - скорректируй их
+- Если пользователь критикует предложенные ранее цели (например: "много углеводов", "высокий калораж") - предложи КОНКРЕТНЫЕ скорректированные цели
 - Форматирование для Telegram (без markdown)
 - Короткие абзацы
 
-Дай совет в таком формате:
+Если пользователь критикует цели, дай ответ в таком формате:
 
-📋 Анализ:
-[короткое резюме что он ел и чего не хватает]
+✅ Вы правы! Давайте скорректируем ваши цели:
 
-🍽️ Вариант 1: [название]
-• [ингредиенты одной строкой]
-• КБЖУ: 300 ккал, 20б/30у/10ж
-• [почему это подходит]
+📊 НОВЫЕ ЦЕЛИ:
+🔥 Калории: [новое значение] (было ${user.calories_goal})
+🥩 Белки: [новое значение]г (было ${user.protein_goal}г)
+🍞 Углеводы: [новое значение]г (было ${user.carbs_goal}г)
+🥑 Жиры: [новое значение]г (было ${user.fat_goal}г)
 
-🍽️ Вариант 2: [название]
-• [ингредиенты одной строкой]
-• КБЖУ: 250 ккал, 15б/25у/12ж
-• [почему это подходит]
+💡 Почему эти цели лучше:
+[объяснение]
 
-💡 Главный совет:
-[что важнее всего сейчас]
+🍽️ Примеры блюд с новыми целями:
+• Завтрак: [пример]
+• Обед: [пример]
+• Ужин: [пример]
+
+Если это обычный вопрос, дай совет в стандартном формате с вариантами блюд.
 
 💧 ВОДА: ${Math.round(user.calories_goal * 0.4)}мл в день (0.4мл на ккал)`
     
