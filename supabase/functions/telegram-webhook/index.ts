@@ -22,7 +22,41 @@ serve(async (req) => {
   try {
     const update = await req.json()
     
-    // Пока убираем callback_query обработку - теперь используем Reply Keyboard
+    // Обработка callback_query (нажатия на inline кнопки)
+    if (update.callback_query) {
+      const callbackQuery = update.callback_query
+      const chatId = callbackQuery.message.chat.id
+      const userId = callbackQuery.from.id
+      const data = callbackQuery.data
+      
+      // Подтверждаем получение callback
+      await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callback_query_id: callbackQuery.id })
+      })
+      
+      // Обработка редактирования блюда
+      if (data.startsWith('edit_meal_')) {
+        const mealId = data.replace('edit_meal_', '')
+        await sendMessage(chatId, '✏️ Напишите правильное название блюда:\n\nНапример: "Треска с черникой и шпинатом"')
+        
+        // Сохраняем состояние редактирования
+        await supabase.from('users').update({ 
+          editing_meal_id: mealId 
+        }).eq('user_id', userId)
+        
+        return success()
+      }
+      
+      // Подтверждение блюда
+      if (data === 'confirm_meal') {
+        await sendMessageWithKeyboard(chatId, '✅ Отлично! Продолжайте в том же духе!', getMainKeyboard())
+        return success()
+      }
+      
+      return success()
+    }
     
     if (update.message) {
       const chatId = update.message.chat.id
@@ -158,6 +192,30 @@ serve(async (req) => {
       
       // Анализ текста
       if (text && !text.startsWith('/')) {
+        // Проверяем, редактирует ли пользователь блюдо
+        const { data: userData } = await supabase
+          .from('users')
+          .select('editing_meal_id')
+          .eq('user_id', userId)
+          .single()
+        
+        if (userData?.editing_meal_id) {
+          // Обновляем название блюда
+          await supabase
+            .from('meals')
+            .update({ meal_name: text })
+            .eq('id', userData.editing_meal_id)
+          
+          // Очищаем состояние редактирования
+          await supabase
+            .from('users')
+            .update({ editing_meal_id: null })
+            .eq('user_id', userId)
+          
+          await sendMessageWithKeyboard(chatId, `✅ Название обновлено!\n\n🍽️ ${text}\n\nТеперь данные сохранены правильно.`, getMainKeyboard())
+          return success()
+        }
+        
         // Проверяем, это параметры пользователя или цель
         const isUserParams = text.toLowerCase().includes('см') || 
                             text.toLowerCase().includes('кг') ||
@@ -205,8 +263,32 @@ serve(async (req) => {
         const fileId = photo[photo.length - 1].file_id
         const fileUrl = await getFileUrl(fileId)
         const analysis = await analyzePhoto(fileUrl)
-        await saveMeal(userId, analysis)
-        await sendMessage(chatId, formatAnalysis(analysis))
+        
+        // Сохраняем meal_id для возможности редактирования
+        const { data: mealData } = await supabase.from('meals').insert({
+          user_id: userId,
+          meal_name: analysis.name,
+          calories: analysis.calories,
+          protein: analysis.protein,
+          carbs: analysis.carbs,
+          fat: analysis.fat,
+          protein_percent: analysis.protein_percent,
+          carbs_percent: analysis.carbs_percent,
+          fat_percent: analysis.fat_percent,
+          weight_grams: analysis.weight
+        }).select('id').single()
+        
+        const mealId = mealData?.id
+        
+        // Добавляем кнопки для редактирования
+        const editKeyboard = {
+          inline_keyboard: [[
+            { text: '✏️ Исправить', callback_data: `edit_meal_${mealId}` },
+            { text: '✅ Верно', callback_data: 'confirm_meal' }
+          ]]
+        }
+        
+        await sendMessageWithInlineKeyboard(chatId, formatAnalysis(analysis) + '\n\n💡 Если название неверное - нажмите "Исправить"', editKeyboard)
         return success()
       }
       
@@ -267,6 +349,18 @@ async function sendMessageWithKeyboard(chatId: number, text: string, keyboard: a
   })
 }
 
+async function sendMessageWithInlineKeyboard(chatId: number, text: string, inlineKeyboard: any) {
+  await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ 
+      chat_id: chatId, 
+      text,
+      reply_markup: inlineKeyboard
+    })
+  })
+}
+
 function getMainKeyboard() {
   return {
     keyboard: [
@@ -312,15 +406,35 @@ async function analyzeFoodText(text: string) {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        model: 'gpt-3.5-turbo',
+        model: 'gpt-4o',
         messages: [
           {
             role: 'system',
-            content: 'Ты нутрициолог. Анализируй описание еды и определяй КБЖУ. Отвечай ТОЛЬКО в JSON: {"name": "название", "calories": число, "protein": число, "carbs": число, "fat": число, "weight": число}'
+            content: `Ты эксперт-нутрициолог. Твоя задача - точно определить КБЖУ из описания еды.
+
+ВАЖНО:
+- Если указан вес/граммовка - используй его
+- Если нет - оцени стандартную порцию
+- Учитывай способ приготовления (жареное +масло, вареное без масла)
+- Суммируй все продукты в одном приеме пищи
+- Будь внимателен к деталям: "с маслом", "острый", "жареный"
+- Рассчитай соотношения БЖУ в процентах от калорий
+
+ПРИМЕРЫ:
+"яичница из 2 яиц" → 2 яйца ~100г, жареные на масле ~200 ккал
+"тарелка борща" → ~300г, ~150 ккал
+"гречка с курицей" → гречка 150г + курица 100г = ~350 ккал
+
+ФОРМАТ ОТВЕТА (только JSON, без комментариев):
+{"name": "детальное название", "calories": число, "protein": число, "carbs": число, "fat": число, "weight": число, "protein_percent": число, "carbs_percent": число, "fat_percent": число}`
           },
-          { role: 'user', content: `Проанализируй это описание еды: ${text}` }
+          { 
+            role: 'user', 
+            content: `Что я съел и какое КБЖУ? "${text}"` 
+          }
         ],
-        max_tokens: 200
+        max_tokens: 300,
+        temperature: 0.5
       })
     })
     
@@ -330,14 +444,29 @@ async function analyzeFoodText(text: string) {
       throw new Error('Invalid OpenAI response')
     }
     
-    const content = data.choices[0].message.content
+    let content = data.choices[0].message.content
+    
+    // Убираем markdown если есть
+    content = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
     
     // Пытаемся распарсить JSON
     try {
-      return JSON.parse(content)
+      const parsed = JSON.parse(content)
+      // Валидация и округление данных
+      return {
+        name: parsed.name || 'Прием пищи',
+        calories: Math.round(parsed.calories || 0),
+        protein: Math.round((parsed.protein || 0) * 10) / 10,
+        carbs: Math.round((parsed.carbs || 0) * 10) / 10,
+        fat: Math.round((parsed.fat || 0) * 10) / 10,
+        weight: Math.round(parsed.weight || 100),
+        protein_percent: Math.round((parsed.protein_percent || 0) * 10) / 10,
+        carbs_percent: Math.round((parsed.carbs_percent || 0) * 10) / 10,
+        fat_percent: Math.round((parsed.fat_percent || 0) * 10) / 10
+      }
     } catch (jsonError) {
       // Если не JSON, пытаемся извлечь данные из текста
-      console.error('JSON parse error:', jsonError)
+      console.error('JSON parse error:', jsonError, 'Content:', content)
       return parseTextResponse(content)
     }
   } catch (error) {
@@ -356,13 +485,26 @@ async function analyzeFoodText(text: string) {
 function parseTextResponse(text: string) {
   // Простой парсер для извлечения чисел из текста
   const numbers = text.match(/\d+\.?\d*/g) || []
+  const calories = parseInt(numbers[0] || '0') || 0
+  const protein = parseFloat(numbers[1] || '0') || 0
+  const carbs = parseFloat(numbers[2] || '0') || 0
+  const fat = parseFloat(numbers[3] || '0') || 0
+  
+  // Рассчитываем проценты
+  const proteinCalories = protein * 4
+  const carbsCalories = carbs * 4
+  const fatCalories = fat * 9
+  
   return {
     name: 'Анализ блюда',
-    calories: parseInt(numbers[0] || '0') || 0,
-    protein: parseFloat(numbers[1] || '0') || 0,
-    carbs: parseFloat(numbers[2] || '0') || 0,
-    fat: parseFloat(numbers[3] || '0') || 0,
-    weight: parseInt(numbers[4] || '100') || 100
+    calories: calories,
+    protein: protein,
+    carbs: carbs,
+    fat: fat,
+    weight: parseInt(numbers[4] || '100') || 100,
+    protein_percent: calories > 0 ? Math.round((proteinCalories / calories) * 100 * 10) / 10 : 0,
+    carbs_percent: calories > 0 ? Math.round((carbsCalories / calories) * 100 * 10) / 10 : 0,
+    fat_percent: calories > 0 ? Math.round((fatCalories / calories) * 100 * 10) / 10 : 0
   }
 }
 
@@ -378,20 +520,51 @@ async function analyzePhoto(fileUrl: string) {
         model: 'gpt-4o',
         messages: [
           {
+            role: 'system',
+            content: `Ты эксперт-нутрициолог, который анализирует фотографии еды.
+
+ТВОЯ ЗАДАЧА:
+1. Внимательно рассмотри фото и определи ВСЕ продукты и блюда на нем
+2. Оцени примерный вес/объем каждого компонента
+3. Рассчитай общее КБЖУ для ВСЕЙ порции на фото (не на 100г!)
+4. Рассчитай соотношения БЖУ в процентах от калорий
+5. Дай подробное описание
+
+ВАЖНО:
+- Указывай РЕАЛЬНЫЙ вес порции в граммах (например, тарелка супа ~300г, котлета ~100г)
+- Если несколько блюд - считай общее КБЖУ
+- Учитывай способ приготовления (жареное, вареное, запеченное)
+- Будь внимателен к соусам, маслу, добавкам
+- Рассчитай процентное соотношение БЖУ
+- НЕ ПРИДУМЫВАЙ продукты! Если видишь рыбу - пиши рыбу, если видишь ягоды - пиши ягоды
+
+ПРИМЕРЫ ПРАВИЛЬНОГО ОПИСАНИЯ:
+- "Треска жареная с черникой и шпинатом" (НЕ "пельмени")
+- "Куриная грудка с рисом и овощами" (НЕ просто "мясо")
+- "Овсянка с бананом и орехами" (НЕ просто "каша")
+
+ФОРМАТ ОТВЕТА (только JSON, без markdown):
+{"name": "подробное название", "calories": число, "protein": число, "carbs": число, "fat": число, "weight": число, "protein_percent": число, "carbs_percent": число, "fat_percent": число}`
+          },
+          {
             role: 'user',
             content: [
               {
                 type: 'text',
-                text: 'Проанализируй фото еды. Определи название и КБЖУ на 100г. Ответь ТОЛЬКО в JSON: {"name": "название", "calories": число, "protein": число, "carbs": число, "fat": число, "weight": число}'
+                text: 'Проанализируй эту еду детально. Что именно здесь на фото? Назови каждый продукт отдельно. Сколько примерно весит вся порция? Какое КБЖУ для всей порции?'
               },
               {
                 type: 'image_url',
-                image_url: { url: fileUrl }
+                image_url: { 
+                  url: fileUrl,
+                  detail: 'high'
+                }
               }
             ]
           }
         ],
-        max_tokens: 300
+        max_tokens: 500,
+        temperature: 0.7
       })
     })
     
@@ -401,12 +574,41 @@ async function analyzePhoto(fileUrl: string) {
       throw new Error('Invalid OpenAI response')
     }
     
-    const content = data.choices[0].message.content
+    let content = data.choices[0].message.content
+    
+    // Убираем markdown если есть
+    content = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
     
     try {
-      return JSON.parse(content)
+      const parsed = JSON.parse(content)
+      
+      // Валидация названия блюда - проверяем на разумность
+      const name = parsed.name || 'Блюдо с фото'
+      const suspiciousNames = ['пельмени', 'борщ', 'суп', 'каша', 'мясо', 'рыба']
+      const hasSuspiciousName = suspiciousNames.some(suspicious => 
+        name.toLowerCase().includes(suspicious) && name.split(' ').length <= 2
+      )
+      
+      if (hasSuspiciousName) {
+        console.log('Suspicious name detected, asking for clarification:', name)
+        // Если название слишком общее, добавляем пометку
+        parsed.name = name + ' (требует уточнения)'
+      }
+      
+      // Валидация данных
+      return {
+        name: parsed.name,
+        calories: Math.round(parsed.calories || 0),
+        protein: Math.round((parsed.protein || 0) * 10) / 10,
+        carbs: Math.round((parsed.carbs || 0) * 10) / 10,
+        fat: Math.round((parsed.fat || 0) * 10) / 10,
+        weight: Math.round(parsed.weight || 100),
+        protein_percent: Math.round((parsed.protein_percent || 0) * 10) / 10,
+        carbs_percent: Math.round((parsed.carbs_percent || 0) * 10) / 10,
+        fat_percent: Math.round((parsed.fat_percent || 0) * 10) / 10
+      }
     } catch (jsonError) {
-      console.error('JSON parse error:', jsonError)
+      console.error('JSON parse error:', jsonError, 'Content:', content)
       return parseTextResponse(content)
     }
   } catch (error) {
@@ -463,7 +665,11 @@ async function saveMeal(userId: number, analysis: any) {
     calories: analysis.calories,
     protein: analysis.protein,
     carbs: analysis.carbs,
-    fat: analysis.fat
+    fat: analysis.fat,
+    protein_percent: analysis.protein_percent,
+    carbs_percent: analysis.carbs_percent,
+    fat_percent: analysis.fat_percent,
+    weight_grams: analysis.weight
   })
 }
 
@@ -526,6 +732,32 @@ ${caloriesText}
 
 📝 Приемов пищи: ${meals.length}`
 
+  // Добавляем детальный анализ КБЖУ
+  const avgProteinPercent = meals.reduce((sum, meal) => sum + (meal.protein_percent || 0), 0) / meals.length
+  const avgCarbsPercent = meals.reduce((sum, meal) => sum + (meal.carbs_percent || 0), 0) / meals.length
+  const avgFatPercent = meals.reduce((sum, meal) => sum + (meal.fat_percent || 0), 0) / meals.length
+  
+  message += `\n\n📊 Соотношение БЖУ за день:`
+  message += `\n🥩 Белки: ${avgProteinPercent.toFixed(1)}%`
+  message += `\n🍞 Углеводы: ${avgCarbsPercent.toFixed(1)}%`
+  message += `\n🥑 Жиры: ${avgFatPercent.toFixed(1)}%`
+  
+  // Анализ баланса
+  let balanceAdvice = ''
+  if (avgProteinPercent < 20) {
+    balanceAdvice += `\n⚠️ Мало белка! Добавьте мясо, рыбу, творог`
+  }
+  if (avgCarbsPercent > 60) {
+    balanceAdvice += `\n⚠️ Много углеводов! Больше овощей`
+  }
+  if (avgFatPercent < 15) {
+    balanceAdvice += `\n⚠️ Мало жиров! Орехи, масло, авокадо`
+  }
+  
+  if (balanceAdvice) {
+    message += `\n\n💡 Советы:${balanceAdvice}`
+  }
+
   // Добавляем данные Apple Watch
   if (healthData) {
     message += `\n\n⌚ Данные Apple Watch:`
@@ -549,6 +781,12 @@ ${caloriesText}
     message += `\n\n⌚ Подключите Apple Watch:\n/sync_weight 75.5 • /sync_steps 12000`
   }
   
+  // Добавляем рекомендации по воде
+  const waterRecommendation = calculateWaterRecommendation(user, healthData)
+  if (waterRecommendation) {
+    message += `\n\n${waterRecommendation}`
+  }
+  
   return message
 }
 
@@ -561,13 +799,46 @@ function getGoalsMessage(userId: number) {
 }
 
 function formatAnalysis(analysis: any) {
-  return `✅ Добавлено в дневник:
+  let message = `✅ Добавлено в дневник:
 
 🍽️ ${analysis.name}
 🔥 ${analysis.calories} ккал
 🥩 ${analysis.protein}г белка
 🍞 ${analysis.carbs}г углеводов
-🥑 ${analysis.fat}г жиров`
+🥑 ${analysis.fat}г жиров
+⚖️ Вес: ${analysis.weight}г`
+
+  // Добавляем соотношения БЖУ
+  if (analysis.protein_percent && analysis.carbs_percent && analysis.fat_percent) {
+    message += `\n\n📊 Соотношение БЖУ:`
+    message += `\n🥩 Белки: ${analysis.protein_percent}%`
+    message += `\n🍞 Углеводы: ${analysis.carbs_percent}%`
+    message += `\n🥑 Жиры: ${analysis.fat_percent}%`
+    
+    // Анализ баланса блюда
+    let balanceAdvice = ''
+    if (analysis.protein_percent < 15) {
+      balanceAdvice += `\n⚠️ Мало белка в этом блюде`
+    } else if (analysis.protein_percent > 40) {
+      balanceAdvice += `\n💪 Отличный источник белка!`
+    }
+    
+    if (analysis.carbs_percent > 70) {
+      balanceAdvice += `\n⚠️ Много углеводов`
+    }
+    
+    if (analysis.fat_percent < 10) {
+      balanceAdvice += `\n⚠️ Мало жиров`
+    } else if (analysis.fat_percent > 50) {
+      balanceAdvice += `\n⚠️ Много жиров`
+    }
+    
+    if (balanceAdvice) {
+      message += `\n\n💡 Анализ:${balanceAdvice}`
+    }
+  }
+
+  return message
 }
 
 function getHelpMessage() {
@@ -673,7 +944,7 @@ async function getRecipeSuggestion(userId: number) {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        model: 'gpt-3.5-turbo',
+        model: 'gpt-4o',
         messages: [
           { role: 'system', content: 'Ты опытный нутрициолог и повар. Предлагай простые и вкусные рецепты.' },
           { role: 'user', content: prompt }
@@ -778,7 +1049,7 @@ async function updateUserParams(userId: number, text: string) {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        model: 'gpt-3.5-turbo',
+        model: 'gpt-4o',
         messages: [
           { role: 'system', content: 'Ты извлекаешь параметры пользователя из текста. Отвечай только в JSON.' },
           { role: 'user', content: prompt }
@@ -874,7 +1145,7 @@ async function generateMealPlan(params: any, goals: any) {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        model: 'gpt-3.5-turbo',
+        model: 'gpt-4o',
         messages: [
           { role: 'system', content: 'Ты опытный нутрициолог. Составляй простые и реалистичные планы питания. НЕ используй markdown.' },
           { role: 'user', content: prompt }
@@ -1002,7 +1273,7 @@ ${userInfo}
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        model: 'gpt-3.5-turbo',
+        model: 'gpt-4o',
         messages: [
           { role: 'system', content: 'Ты опытный и дружелюбный нутрициолог. Даешь персональные советы по питанию.' },
           { role: 'user', content: prompt }
@@ -1226,4 +1497,57 @@ function calculateAdjustedCalories(baseCalories: number, healthData: any): numbe
   }
   
   return adjusted
+}
+
+function calculateWaterRecommendation(user: any, healthData: any): string {
+  if (!user) return ''
+  
+  // Базовая норма: 35мл на кг веса
+  const baseWater = Math.round((user.weight || 70) * 35)
+  
+  // Корректировки
+  let adjustments: string[] = []
+  let totalWater = baseWater
+  
+  // Активность
+  if (healthData?.steps && healthData.steps >= 15000) {
+    totalWater += 500
+    adjustments.push('+500мл за высокую активность')
+  } else if (healthData?.steps && healthData.steps >= 10000) {
+    totalWater += 300
+    adjustments.push('+300мл за активность')
+  }
+  
+  // Тренировки
+  if (healthData?.active_calories && healthData.active_calories >= 500) {
+    totalWater += 400
+    adjustments.push('+400мл за тренировку')
+  }
+  
+  // Жаркая погода (примерно)
+  const currentHour = new Date().getHours()
+  if (currentHour >= 10 && currentHour <= 18) {
+    totalWater += 200
+    adjustments.push('+200мл за дневное время')
+  }
+  
+  // Недосып
+  if (healthData?.sleep_hours && healthData.sleep_hours < 6) {
+    totalWater += 300
+    adjustments.push('+300мл за недосып')
+  }
+  
+  let message = `💧 Рекомендация по воде: ${totalWater}мл`
+  
+  if (adjustments.length > 0) {
+    message += `\n\n📊 Корректировки:\n${adjustments.join('\n')}`
+  }
+  
+  // Советы по времени питья
+  message += `\n\n⏰ Схема питья:\n`
+  message += `• Утром: ${Math.round(totalWater * 0.3)}мл (30%)\n`
+  message += `• Днем: ${Math.round(totalWater * 0.4)}мл (40%)\n`
+  message += `• Вечером: ${Math.round(totalWater * 0.3)}мл (30%)`
+  
+  return message
 }
