@@ -105,26 +105,43 @@ serve(async (req) => {
       
       // Анализ текста
       if (text && !text.startsWith('/')) {
-        // Проверяем, спрашивает ли пользователь совет
-        const isQuestion = text.toLowerCase().includes('что') || 
-                          text.toLowerCase().includes('посоветуй') ||
-                          text.toLowerCase().includes('предложи') ||
-                          text.toLowerCase().includes('?')
+        // Проверяем, это параметры пользователя или цель
+        const isUserParams = text.toLowerCase().includes('см') || 
+                            text.toLowerCase().includes('кг') ||
+                            text.toLowerCase().includes('вешу') ||
+                            text.toLowerCase().includes('рост') ||
+                            text.toLowerCase().includes('сбросить') ||
+                            text.toLowerCase().includes('набрать') ||
+                            text.toLowerCase().includes('зал') ||
+                            text.toLowerCase().includes('тренировки')
         
-        if (isQuestion) {
-          // Даем совет или рецепт
-          await sendMessage(chatId, '🤔 Анализирую ваш рацион и подбираю рекомендации...')
-          const advice = await getSmartAdvice(userId, text)
-          await sendMessage(chatId, advice)
+        if (isUserParams) {
+          // Обновляем параметры пользователя
+          await sendMessage(chatId, '📝 Обновляю ваши параметры и цели...')
+          const result = await updateUserParams(userId, text)
+          await sendMessageWithKeyboard(chatId, result, getMainKeyboard())
         } else {
-          // Обычный анализ еды
-          await sendMessage(chatId, '🤔 Анализирую ваше сообщение...')
-          const analysis = await analyzeFoodText(text)
-          await saveMeal(userId, analysis)
+          // Проверяем, спрашивает ли пользователь совет
+          const isQuestion = text.toLowerCase().includes('что') || 
+                            text.toLowerCase().includes('посоветуй') ||
+                            text.toLowerCase().includes('предложи') ||
+                            text.toLowerCase().includes('?')
           
-          // Даем анализ + совет
-          const advice = await getAdviceAfterMeal(userId, analysis)
-          await sendMessage(chatId, formatAnalysis(analysis) + '\n\n' + advice)
+          if (isQuestion) {
+            // Даем совет или рецепт
+            await sendMessage(chatId, '🤔 Анализирую ваш рацион и подбираю рекомендации...')
+            const advice = await getSmartAdvice(userId, text)
+            await sendMessageWithKeyboard(chatId, advice, getMainKeyboard())
+          } else {
+            // Обычный анализ еды
+            await sendMessage(chatId, '🤔 Анализирую ваше сообщение...')
+            const analysis = await analyzeFoodText(text)
+            await saveMeal(userId, analysis)
+            
+            // Даем анализ + совет
+            const advice = await getAdviceAfterMeal(userId, analysis)
+            await sendMessageWithKeyboard(chatId, formatAnalysis(analysis) + '\n\n' + advice, getMainKeyboard())
+          }
         }
         return success()
       }
@@ -641,6 +658,113 @@ async function getAdviceAfterMeal(userId: number, meal: any) {
   }
 }
 
+async function updateUserParams(userId: number, text: string) {
+  try {
+    const prompt = `Извлеки параметры пользователя из текста: "${text}"
+
+Найди:
+- Рост в см
+- Вес в кг  
+- Цель (сбросить/набрать вес)
+- Количество кг для сброса/набора
+- Активность (зал, тренировки, спорт)
+
+Ответь ТОЛЬКО в JSON:
+{
+  "height": число_см,
+  "weight": число_кг,
+  "goal": "lose" или "gain",
+  "target_weight": число_кг,
+  "activity": "high" или "medium" или "low"
+}
+
+Если чего-то нет, поставь null.`
+    
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'gpt-3.5-turbo',
+        messages: [
+          { role: 'system', content: 'Ты извлекаешь параметры пользователя из текста. Отвечай только в JSON.' },
+          { role: 'user', content: prompt }
+        ],
+        max_tokens: 200
+      })
+    })
+    
+    const data = await response.json()
+    const content = data.choices?.[0]?.message?.content
+    const params = JSON.parse(content)
+    
+    // Вычисляем цели по КБЖУ на основе параметров
+    const goals = calculateNutritionGoals(params)
+    
+    // Обновляем пользователя в базе
+    await supabase
+      .from('users')
+      .update({
+        height: params.height,
+        weight: params.weight,
+        goal: params.goal,
+        target_weight: params.target_weight,
+        activity: params.activity,
+        calories_goal: goals.calories,
+        protein_goal: goals.protein,
+        carbs_goal: goals.carbs,
+        fat_goal: goals.fat
+      })
+      .eq('user_id', userId)
+    
+    return `✅ Параметры обновлены!
+
+📏 Рост: ${params.height} см
+⚖️ Вес: ${params.weight} кг
+🎯 Цель: ${params.goal === 'lose' ? 'Сбросить' : 'Набрать'} ${Math.abs(params.target_weight - params.weight)} кг
+🏋️ Активность: ${params.activity === 'high' ? 'Высокая (зал)' : params.activity === 'medium' ? 'Средняя' : 'Низкая'}
+
+📊 Рекомендуемые цели на день:
+🔥 Калории: ${goals.calories}
+🥩 Белки: ${goals.protein}г
+🍞 Углеводы: ${goals.carbs}г
+🥑 Жиры: ${goals.fat}г
+
+Теперь я буду давать советы с учетом ваших целей!`
+  } catch (error) {
+    console.error('Update params error:', error)
+    return '❌ Не удалось обновить параметры. Попробуйте еще раз.'
+  }
+}
+
+function calculateNutritionGoals(params: any) {
+  // Базовый метаболизм (формула Миффлина-Сан Жеора)
+  let bmr = 10 * params.weight + 6.25 * params.height - 5 * 30 + 5 // мужчина 30 лет
+  
+  // Коэффициент активности
+  let activityMultiplier = 1.2
+  if (params.activity === 'high') activityMultiplier = 1.7
+  else if (params.activity === 'medium') activityMultiplier = 1.5
+  
+  let calories = Math.round(bmr * activityMultiplier)
+  
+  // Корректировка на цель
+  if (params.goal === 'lose') {
+    calories -= 500 // дефицит для похудения
+  } else if (params.goal === 'gain') {
+    calories += 300 // профицит для набора
+  }
+  
+  // Макросы
+  const protein = Math.round(params.weight * 2.2) // 2.2г на кг веса для тренирующихся
+  const carbs = Math.round(calories * 0.4 / 4) // 40% от калорий
+  const fat = Math.round(calories * 0.25 / 9) // 25% от калорий
+  
+  return { calories, protein, carbs, fat }
+}
+
 async function getSmartAdvice(userId: number, question: string) {
   try {
     const { data: user } = await supabase
@@ -676,7 +800,11 @@ async function getSmartAdvice(userId: number, question: string) {
       fat: user.fat_goal - total.fat
     }
     
+    const userInfo = user.height ? `Пользователь: ${user.height}см, ${user.weight}кг, цель ${user.goal === 'lose' ? 'сбросить' : 'набрать'} вес` : ''
+    
     const prompt = `Ты нутрициолог в Telegram. Пользователь спрашивает: "${question}"
+
+${userInfo}
 
 Сегодня он уже ел: ${mealsList}
 Съедено: ${total.calories} ккал, ${total.protein.toFixed(0)}г белка, ${total.carbs.toFixed(0)}г углеводов, ${total.fat.toFixed(0)}г жиров
