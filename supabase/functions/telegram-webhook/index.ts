@@ -22,39 +22,7 @@ serve(async (req) => {
   try {
     const update = await req.json()
     
-    // Обработка callback от inline кнопок
-    if (update.callback_query) {
-      const callbackQuery = update.callback_query
-      const chatId = callbackQuery.message.chat.id
-      const userId = callbackQuery.from.id
-      const data = callbackQuery.data
-      
-      // Отвечаем на callback
-      await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ callback_query_id: callbackQuery.id })
-      })
-      
-      // Обрабатываем действия
-      if (data === 'stats') {
-        const stats = await getDailyStats(userId)
-        await sendMessage(chatId, stats)
-      } else if (data === 'recipe') {
-        await sendMessage(chatId, '🥘 Ищу подходящие рецепты...')
-        const recipe = await getRecipeSuggestion(userId)
-        await sendMessage(chatId, recipe)
-      } else if (data === 'undo') {
-        const result = await undoLastMeal(userId)
-        await sendMessage(chatId, result)
-      } else if (data === 'goals') {
-        await sendMessage(chatId, getGoalsMessage(userId))
-      } else if (data === 'menu') {
-        await sendMessageWithKeyboard(chatId, '🍎 Главное меню:', getMainKeyboard())
-      }
-      
-      return success()
-    }
+    // Пока убираем callback_query обработку - теперь используем Reply Keyboard
     
     if (update.message) {
       const chatId = update.message.chat.id
@@ -64,42 +32,52 @@ serve(async (req) => {
       
       // Обработка команд
       if (text?.startsWith('/start')) {
-        await sendMessageWithKeyboard(chatId, getWelcomeMessage(), getMainKeyboard())
         await ensureUser(userId, update.message.from.username)
+        const user = await getUser(userId)
+        
+        if (!user || !user.height) {
+          // Первый запуск - запрашиваем параметры
+          await sendMessage(chatId, getInitialSetupMessage())
+        } else {
+          // Пользователь уже настроен
+          await sendMessageWithKeyboard(chatId, getWelcomeMessage(), getMainKeyboard())
+        }
         return success()
       }
       
-      if (text?.startsWith('/menu')) {
-        await sendMessageWithKeyboard(chatId, '🍎 Главное меню:', getMainKeyboard())
+      if (text?.startsWith('/menu') || text?.startsWith('/help')) {
+        await sendMessageWithKeyboard(chatId, getHelpMessage(), getMainKeyboard())
         return success()
       }
       
-      if (text?.startsWith('/help')) {
-        await sendMessage(chatId, getHelpMessage())
-        return success()
-      }
-      
-      if (text?.startsWith('/stats')) {
+      // Обработка кнопок меню
+      if (text === '📊 Статистика' || text?.startsWith('/stats')) {
         const stats = await getDailyStats(userId)
-        await sendMessage(chatId, stats)
+        await sendMessageWithKeyboard(chatId, stats, getMainKeyboard())
         return success()
       }
       
-      if (text?.startsWith('/goals')) {
-        await sendMessage(chatId, getGoalsMessage(userId))
+      if (text === '🥘 Что поесть?' || text?.startsWith('/recipe')) {
+        await sendMessage(chatId, '🤔 Анализирую ваш рацион и подбираю рекомендации...')
+        const advice = await getSmartAdvice(userId, 'что мне поесть сейчас?')
+        await sendMessageWithKeyboard(chatId, advice, getMainKeyboard())
         return success()
       }
       
-      if (text?.startsWith('/recipe')) {
-        await sendMessage(chatId, '🥘 Ищу подходящие рецепты...')
-        const recipe = await getRecipeSuggestion(userId)
-        await sendMessage(chatId, recipe)
-        return success()
-      }
-      
-      if (text?.startsWith('/undo')) {
+      if (text === '↩️ Отменить последнее' || text?.startsWith('/undo')) {
         const result = await undoLastMeal(userId)
-        await sendMessage(chatId, result)
+        await sendMessageWithKeyboard(chatId, result, getMainKeyboard())
+        return success()
+      }
+      
+      if (text === '⚙️ Мои параметры' || text?.startsWith('/params')) {
+        const user = await getUser(userId)
+        if (user) {
+          const paramsText = getUserParamsText(user)
+          await sendMessageWithKeyboard(chatId, paramsText, getMainKeyboard())
+        } else {
+          await sendMessage(chatId, '❌ Сначала используйте /start')
+        }
         return success()
       }
       
@@ -216,19 +194,18 @@ async function sendMessageWithKeyboard(chatId: number, text: string, keyboard: a
 
 function getMainKeyboard() {
   return {
-    inline_keyboard: [
+    keyboard: [
       [
-        { text: '📊 Статистика', callback_data: 'stats' },
-        { text: '🥘 Рецепты', callback_data: 'recipe' }
+        { text: '📊 Статистика' },
+        { text: '🥘 Что поесть?' }
       ],
       [
-        { text: '🎯 Цели', callback_data: 'goals' },
-        { text: '↩️ Отменить', callback_data: 'undo' }
-      ],
-      [
-        { text: '🍎 Меню', callback_data: 'menu' }
+        { text: '⚙️ Мои параметры' },
+        { text: '↩️ Отменить последнее' }
       ]
-    ]
+    ],
+    resize_keyboard: true,
+    persistent: true
   }
 }
 
@@ -470,17 +447,6 @@ function formatAnalysis(analysis: any) {
 🥑 ${analysis.fat}г жиров`
 }
 
-function getWelcomeMessage() {
-  return `🍎 Добро пожаловать в бота-нутрициолога!
-
-Я помогу вам отслеживать питание и КБЖУ. Отправьте мне:
-📝 Текст о том, что вы ели
-📷 Фото еды
-🎤 Голосовое сообщение
-
-Вечером я пришлю отчет по дню!`
-}
-
 function getHelpMessage() {
   return `🍎 Помощь по боту-нутрициологу:
 
@@ -668,6 +634,7 @@ async function updateUserParams(userId: number, text: string) {
 - Цель (сбросить/набрать вес)
 - Количество кг для сброса/набора
 - Активность (зал, тренировки, спорт)
+- Возраст (если указан)
 
 Ответь ТОЛЬКО в JSON:
 {
@@ -675,7 +642,8 @@ async function updateUserParams(userId: number, text: string) {
   "weight": число_кг,
   "goal": "lose" или "gain",
   "target_weight": число_кг,
-  "activity": "high" или "medium" или "low"
+  "activity": "high" или "medium" или "low",
+  "age": число_лет_или_null
 }
 
 Если чего-то нет, поставь null.`
@@ -719,23 +687,90 @@ async function updateUserParams(userId: number, text: string) {
       })
       .eq('user_id', userId)
     
-    return `✅ Параметры обновлены!
+    // Генерируем план рациона
+    const mealPlan = await generateMealPlan(params, goals)
+    
+    return `✅ Отлично! Я составил ваш персональный план!
 
+📋 Ваши параметры:
 📏 Рост: ${params.height} см
 ⚖️ Вес: ${params.weight} кг
-🎯 Цель: ${params.goal === 'lose' ? 'Сбросить' : 'Набрать'} ${Math.abs(params.target_weight - params.weight)} кг
-🏋️ Активность: ${params.activity === 'high' ? 'Высокая (зал)' : params.activity === 'medium' ? 'Средняя' : 'Низкая'}
+🎯 Цель: ${params.goal === 'lose' ? 'Сбросить' : params.goal === 'gain' ? 'Набрать' : 'Поддержать'} ${params.target_weight ? Math.abs(params.target_weight - params.weight) + ' кг' : 'вес'}
+🏋️ Активность: ${params.activity === 'high' ? 'Высокая (зал 3-5 раз)' : params.activity === 'medium' ? 'Средняя (1-2 раза)' : 'Низкая'}
 
-📊 Рекомендуемые цели на день:
+📊 Ваши цели на день:
 🔥 Калории: ${goals.calories}
 🥩 Белки: ${goals.protein}г
 🍞 Углеводы: ${goals.carbs}г
 🥑 Жиры: ${goals.fat}г
 
-Теперь я буду давать советы с учетом ваших целей!`
+${mealPlan}
+
+Готово! Теперь просто отправляйте мне что едите, и я буду следить за вашим прогрессом! 🎯`
   } catch (error) {
     console.error('Update params error:', error)
     return '❌ Не удалось обновить параметры. Попробуйте еще раз.'
+  }
+}
+
+async function generateMealPlan(params: any, goals: any) {
+  try {
+    const goalText = params.goal === 'lose' ? 'похудение' : params.goal === 'gain' ? 'набор массы' : 'поддержание веса'
+    
+    const prompt = `Составь примерный план рациона на день для человека:
+- Вес: ${params.weight}кг
+- Цель: ${goalText}
+- Активность: ${params.activity === 'high' ? 'высокая (тренировки)' : 'средняя'}
+- Калории: ${goals.calories}
+- Белки: ${goals.protein}г
+- Углеводы: ${goals.carbs}г
+- Жиры: ${goals.fat}г
+
+Формат ответа (БЕЗ markdown, только эмодзи и текст):
+
+🍽️ ПРИМЕРНЫЙ ПЛАН РАЦИОНА:
+
+🌅 Завтрак (7:00-9:00)
+• [простое блюдо]
+• КБЖУ: XXX ккал, XXб/XXу/XXж
+
+🥗 Обед (13:00-14:00)
+• [простое блюдо]
+• КБЖУ: XXX ккал, XXб/XXу/XXж
+
+🍖 Ужин (19:00-20:00)
+• [простое блюдо]
+• КБЖУ: XXX ккал, XXб/XXу/XXж
+
+💡 Совет: [короткий совет по питанию]`
+    
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'gpt-3.5-turbo',
+        messages: [
+          { role: 'system', content: 'Ты опытный нутрициолог. Составляй простые и реалистичные планы питания. НЕ используй markdown.' },
+          { role: 'user', content: prompt }
+        ],
+        max_tokens: 500
+      })
+    })
+    
+    const data = await response.json()
+    return data.choices?.[0]?.message?.content || ''
+  } catch (error) {
+    console.error('Meal plan error:', error)
+    return `🍽️ ПРИМЕРНЫЙ ПЛАН РАЦИОНА:
+
+🌅 Завтрак: Овсянка с фруктами, яйца
+🥗 Обед: Курица с рисом и овощами
+🍖 Ужин: Рыба с салатом
+
+Я буду помогать вам следовать этому плану!`
   }
 }
 
@@ -873,4 +908,118 @@ ${advice}`
     console.error('Smart advice error:', error)
     return '❌ Ошибка при получении совета. Попробуйте позже.'
   }
+}
+
+async function getUser(userId: number) {
+  const { data } = await supabase
+    .from('users')
+    .select('*')
+    .eq('user_id', userId)
+    .single()
+  return data
+}
+
+function getInitialSetupMessage() {
+  return `🍎 Добро пожаловать в AI бота-нутрициолога!
+
+Я ваш персональный помощник в питании. Помогу:
+✅ Отслеживать КБЖУ из текста, фото и голоса
+✅ Анализировать ваш рацион
+✅ Предлагать рецепты под ваши цели
+✅ Составлять план питания
+✅ Отправлять ежедневные отчеты
+
+Для персонализированных рекомендаций расскажите о себе:
+
+📏 Рост (в см)
+⚖️ Текущий вес (в кг)
+🎯 Цель (сбросить/набрать/поддержать вес)
+📊 На сколько кг (если худеете/набираете)
+🏋️ Уровень активности (зал 3-5 раз/неделя, тренировки 1-2 раза, малоподвижный)
+👤 Возраст (опционально)
+
+Пример:
+"Мне 30 лет, рост 180см, вешу 85кг, хочу сбросить 10кг, хожу в зал 4 раза в неделю"
+
+После этого я составлю персональный план рациона и рассчитаю ваши цели по КБЖУ!
+
+⚠️ Важно: Вся аналитика примерная!
+Точный расчет КБЖУ возможен только при указании точных граммовок продуктов.
+
+Расскажите о себе одним сообщением:`
+}
+
+function getUserParamsText(user: any) {
+  const goalText = user.goal === 'lose' ? 'Сбросить' : user.goal === 'gain' ? 'Набрать' : 'Поддержать'
+  const activityText = user.activity === 'high' ? 'Высокая (зал)' : 
+                      user.activity === 'medium' ? 'Средняя' : 'Низкая'
+  
+  return `⚙️ Ваши параметры:
+
+📏 Рост: ${user.height || 'не указан'} см
+⚖️ Вес: ${user.weight || 'не указан'} кг
+🎯 Цель: ${goalText} ${user.target_weight ? Math.abs(user.target_weight - user.weight) : ''} кг
+🏋️ Активность: ${activityText}
+
+📊 Текущие цели на день:
+🔥 Калории: ${user.calories_goal}
+🥩 Белки: ${user.protein_goal}г
+🍞 Углеводы: ${user.carbs_goal}г
+🥑 Жиры: ${user.fat_goal}г
+
+💡 Чтобы изменить параметры, просто напишите новые данные одним сообщением.
+
+⚠️ Помните: аналитика примерная!
+Для точного расчета указывайте граммовки продуктов.`
+}
+
+function getWelcomeMessage() {
+  return `🍎 Добро пожаловать в AI бота-нутрициолога!
+
+Я ваш персональный помощник по питанию с искусственным интеллектом!
+
+🎯 ЧТО Я УМЕЮ:
+
+📊 Анализирую еду:
+• Текст: "Я ел гречку с курицей"
+• Фото: отправьте фото блюда
+• Голос: запишите что ели
+→ Сразу даю КБЖУ и советы
+
+🥘 Помогаю с питанием:
+• "Что поесть?" → предложу 2-3 варианта под ваши цели
+• Рассчитываю персональные нормы КБЖУ
+• Составляю план рациона на день
+• Предупреждаю о переедании/недоедании
+
+📈 Отслеживаю прогресс:
+• Статистика за день (📊 кнопка)
+• Ежедневные отчеты в 21:00
+• Напоминания о приемах пищи
+
+⚙️ Настройки:
+• Укажите параметры (рост, вес, цель)
+• Я рассчитаю вашу норму калорий
+• Посмотреть параметры: кнопка ⚙️
+
+💡 КАК ПОЛЬЗОВАТЬСЯ:
+
+1️⃣ Расскажите о себе один раз:
+"Я 180см, вешу 80кг, хочу сбросить 10кг, хожу в зал"
+
+2️⃣ Записывайте еду любым способом:
+"Позавтракал овсянкой и яйцами"
+[фото еды]
+[голосовое сообщение]
+
+3️⃣ Спрашивайте совет:
+"Что мне поесть?"
+"Посоветуй рецепт"
+
+4️⃣ Используйте кнопки внизу для быстрого доступа
+
+⚠️ Важно: Аналитика примерная!
+Точный КБЖУ только при указании граммовок.
+
+Готовы начать? Расскажите о себе! 🚀`
 }

@@ -80,28 +80,61 @@ ${advice}
 
 function generateAdvice(total: any, goals: any) {
   const advice = []
+  const motivation = []
   
   const calDiff = total.calories - goals.calories_goal
+  const calPercent = Math.abs(calDiff) / goals.calories_goal * 100
+  
+  // Анализ калорий с дружеским тоном
   if (calDiff > 100) {
     advice.push(`⚠️ Переедание на ${calDiff} ккал`)
+    if (calDiff < 300) {
+      motivation.push(`Но это небольшой перебор! Завтра легко компенсируем 💪`)
+    } else {
+      motivation.push(`Не переживай, бывает! Главное — вернуться к плану завтра 🎯`)
+    }
   } else if (calDiff < -200) {
     advice.push(`⚠️ Недоедание на ${Math.abs(calDiff)} ккал`)
+    motivation.push(`Не забывай кушать! Организму нужна энергия ⚡`)
+  } else {
+    motivation.push(`🎉 Отлично! Ты точно попал в цель по калориям!`)
   }
   
+  // Анализ белка
   const protDiff = total.protein - goals.protein_goal
   if (protDiff < -20) {
     advice.push(`🥩 Мало белка: ${total.protein.toFixed(1)}г из ${goals.protein_goal}г`)
+    motivation.push(`Завтра добавь курицу, творог или яйца — мышцам нужен белок! 💪`)
+  } else if (protDiff >= -10 && protDiff <= 10) {
+    motivation.push(`🥩 Белка идеально! Мышцы скажут спасибо 👊`)
   }
   
+  // Анализ углеводов
   const carbsDiff = total.carbs - goals.carbs_goal
   if (carbsDiff > 50) {
-    advice.push(`🍞 Много углеводов: ${total.carbs.toFixed(1)}г из ${goals.carbs_goal}г`)
+    advice.push(`🍞 Много углеводов: ${total.carbs.toFixed(1)}г`)
+    motivation.push(`Попробуй завтра больше овощей вместо каш 🥗`)
   }
   
+  // Анализ жиров
   const fatDiff = total.fat - goals.fat_goal
   if (fatDiff > 20) {
-    advice.push(`🥑 Много жиров: ${total.fat.toFixed(1)}г из ${goals.fat_goal}г`)
+    advice.push(`🥑 Много жиров: ${total.fat.toFixed(1)}г`)
+  } else if (fatDiff >= -5 && fatDiff <= 5) {
+    motivation.push(`🥑 Жиров в норме! Отлично для гормонов 🎯`)
   }
   
-  return advice.length > 0 ? advice.join('\n') : '✅ Отличный баланс КБЖУ!'
+  // Общая оценка дня
+  let summary = ''
+  if (calPercent < 5 && Math.abs(protDiff) < 15) {
+    summary = `\n\n⭐⭐⭐ ИДЕАЛЬНЫЙ ДЕНЬ! Ты молодец! 🎊`
+  } else if (calPercent < 10) {
+    summary = `\n\n👍 Хороший день! Продолжай в том же духе!`
+  } else {
+    summary = `\n\n💪 Завтра будет лучше! Я верю в тебя!`
+  }
+  
+  return (advice.length > 0 ? advice.join('\n') + '\n\n' : '') + 
+         (motivation.length > 0 ? motivation.join('\n') : '') + 
+         summary
 }
