@@ -225,6 +225,48 @@ serve(async (req) => {
         return success()
       }
       
+      // Сохранение предложенных целей
+      if (data === 'save_goals') {
+        const { data: user } = await supabase
+          .from('users')
+          .select('temp_goals')
+          .eq('user_id', userId)
+          .single()
+        
+        if (user?.temp_goals) {
+          const goals = user.temp_goals
+          await supabase
+            .from('users')
+            .update({
+              calories_goal: goals.calories,
+              protein_goal: goals.protein,
+              carbs_goal: goals.carbs,
+              fat_goal: goals.fat,
+              temp_goals: null
+            })
+            .eq('user_id', userId)
+          
+          await sendMessageWithKeyboard(chatId, 
+            `✅ Цели сохранены!\n\n📊 Ваши новые цели:\n🔥 ${goals.calories} ккал\n🥩 ${goals.protein}г белка\n🍞 ${goals.carbs}г углеводов\n🥑 ${goals.fat}г жиров\n\nУдачи в достижении целей! 💪`, 
+            getMainKeyboard())
+        } else {
+          await sendMessage(chatId, '❌ Нет сохраненных целей для применения')
+        }
+        return success()
+      }
+      
+      // Предложить свои цели
+      if (data === 'suggest_own_goals') {
+        await sendMessage(chatId, '✏️ Напишите свои цели в формате:\n\n"2500 ккал, 200г белка, 200г углеводов, 70г жиров"\n\nИли просто:\n"2500 калорий"\n\nИли голосом опишите что хотите изменить.')
+        return success()
+      }
+      
+      // Ручное редактирование КБЖУ
+      if (data === 'edit_goals_manual') {
+        await sendMessage(chatId, '✏️ Введите новые цели по КБЖУ:\n\n📝 Формат:\n"2500 ккал, 200г белка, 200г углеводов, 70г жиров"\n\n💡 Или можете указать только то, что хотите изменить:\n"2500 калорий"\n"200г белка"\n\n🎤 Также можете сказать голосом!')
+        return success()
+      }
+      
       return success()
     }
     
@@ -307,6 +349,8 @@ serve(async (req) => {
           // Добавляем инлайн-кнопки для дополнительных действий
           const inlineKeyboard = {
             inline_keyboard: [[
+              { text: '✏️ Редактировать КБЖУ', callback_data: 'edit_goals_manual' },
+            ], [
               { text: '🗑️ Очистить статистику за сегодня', callback_data: 'clear_today_stats' },
             ], [
               { text: '🗑️ Очистить всю статистику', callback_data: 'clear_all_stats' }
@@ -694,13 +738,33 @@ serve(async (req) => {
             
             const advice = await getSmartAdvice(userId, text)
             
-            // Извлекаем и обновляем цели из ответа
-            await extractAndUpdateGoals(userId, advice)
+            // Извлекаем и сохраняем предложенные цели временно
+            const tempGoals = await extractAndSaveTempGoals(userId, advice)
             
             // Сохраняем ответ бота в контекст
             await addToContext(userId, 'assistant', advice)
             
-            await sendMessageWithKeyboard(chatId, advice, getMainKeyboard())
+            // Если есть предложенные цели - добавляем кнопку "Сохранить"
+            if (tempGoals) {
+              const saveKeyboard = {
+                inline_keyboard: [[
+                  { text: '✅ Сохранить эти цели', callback_data: 'save_goals' },
+                  { text: '✏️ Предложить свои', callback_data: 'suggest_own_goals' }
+                ]]
+              }
+              
+              await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  chat_id: chatId,
+                  text: advice,
+                  reply_markup: saveKeyboard
+                })
+              })
+            } else {
+              await sendMessageWithKeyboard(chatId, advice, getMainKeyboard())
+            }
           } else if (isAdviceRequest) {
             // Это запрос на совет - даем рекомендации
             await sendMessage(chatId, '🤔 Анализирую ваш рацион и подбираю рекомендации...')
@@ -1636,8 +1700,8 @@ function calculateNutritionGoals(params: any) {
   return { calories, protein, carbs, fat }
 }
 
-// Функция для извлечения и обновления целей из ответа GPT
-async function extractAndUpdateGoals(userId: number, advice: string) {
+// Функция для извлечения и сохранения предложенных целей (временно)
+async function extractAndSaveTempGoals(userId: number, advice: string): Promise<any | null> {
   try {
     // Ищем новые цели в ответе
     const caloriesMatch = advice.match(/🔥 Калории:\s*(\d+)/i)
@@ -1646,22 +1710,26 @@ async function extractAndUpdateGoals(userId: number, advice: string) {
     const fatMatch = advice.match(/🥑 Жиры:\s*(\d+)/i)
     
     if (caloriesMatch || proteinMatch || carbsMatch || fatMatch) {
-      const updates: any = {}
+      const tempGoals: any = {}
       
-      if (caloriesMatch) updates.calories_goal = parseInt(caloriesMatch[1])
-      if (proteinMatch) updates.protein_goal = parseInt(proteinMatch[1])
-      if (carbsMatch) updates.carbs_goal = parseInt(carbsMatch[1])
-      if (fatMatch) updates.fat_goal = parseInt(fatMatch[1])
+      if (caloriesMatch) tempGoals.calories = parseInt(caloriesMatch[1])
+      if (proteinMatch) tempGoals.protein = parseInt(proteinMatch[1])
+      if (carbsMatch) tempGoals.carbs = parseInt(carbsMatch[1])
+      if (fatMatch) tempGoals.fat = parseInt(fatMatch[1])
       
+      // Сохраняем во временное хранилище
       await supabase
         .from('users')
-        .update(updates)
+        .update({ temp_goals: tempGoals })
         .eq('user_id', userId)
       
-      console.log(`Updated goals for user ${userId}:`, updates)
+      console.log(`Saved temp goals for user ${userId}:`, tempGoals)
+      return tempGoals
     }
+    return null
   } catch (error) {
     console.error('Extract goals error:', error)
+    return null
   }
 }
 
