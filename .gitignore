@@ -1,0 +1,40 @@
+# Gitignore для Telegram бота нутрициолога
+
+# Supabase
+.supabase/
+.env.local
+
+# Python (старое)
+venv/
+env/
+ENV/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Переменные окружения
+.env
+.env.local
+.env.*.local
+secrets.py
+
+# Логи
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Временные файлы
+tmp/
+temp/
+*.tmp
+
+# Deno
+deno.lock
