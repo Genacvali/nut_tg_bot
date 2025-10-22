@@ -81,6 +81,81 @@ serve(async (req) => {
         return success()
       }
       
+      // Синхронизация данных Apple Watch / Apple Health
+      if (text?.startsWith('/sync_weight ')) {
+        const weight = parseFloat(text.split(' ')[1])
+        if (weight && weight > 30 && weight < 300) {
+          await syncHealthData(userId, 'weight', weight)
+          await sendMessageWithKeyboard(chatId, `✅ Вес записан: ${weight} кг\n\n⌚ Используйте Apple Shortcuts для автоматической синхронизации!`, getMainKeyboard())
+        } else {
+          await sendMessage(chatId, '❌ Укажите корректный вес: /sync_weight 75.5')
+        }
+        return success()
+      }
+
+      if (text?.startsWith('/sync_steps ')) {
+        const steps = parseInt(text.split(' ')[1])
+        if (steps && steps > 0 && steps < 100000) {
+          await syncHealthData(userId, 'steps', steps)
+          let message = `✅ Шаги записаны: ${steps.toLocaleString()} 👟`
+          
+          // Мотивация в зависимости от количества шагов
+          if (steps >= 15000) {
+            message += `\n\n🔥 Отлично! Это высокая активность!\nДобавил +300 ккал к вашей дневной норме.`
+          } else if (steps >= 10000) {
+            message += `\n\n👍 Хорошо! Цель 10000 шагов достигнута!`
+          } else if (steps >= 5000) {
+            message += `\n\n💪 Неплохо, но давайте стремиться к 10000!`
+          }
+          
+          await sendMessageWithKeyboard(chatId, message, getMainKeyboard())
+        } else {
+          await sendMessage(chatId, '❌ Укажите количество шагов: /sync_steps 12000')
+        }
+        return success()
+      }
+
+      if (text?.startsWith('/sync_sleep ')) {
+        const sleep = parseFloat(text.split(' ')[1])
+        if (sleep && sleep > 0 && sleep < 24) {
+          await syncHealthData(userId, 'sleep_hours', sleep)
+          let message = `✅ Сон записан: ${sleep}ч 🛌`
+          
+          // Советы в зависимости от продолжительности сна
+          if (sleep < 6) {
+            message += `\n\n⚠️ Мало сна! Организм в стрессе.\nДобавил +200 ккал к норме для восстановления.`
+          } else if (sleep >= 7 && sleep <= 9) {
+            message += `\n\n✅ Идеальный сон! Отлично для восстановления!`
+          } else if (sleep > 9) {
+            message += `\n\n😴 Много сна - возможно, нужен отдых?`
+          }
+          
+          await sendMessageWithKeyboard(chatId, message, getMainKeyboard())
+        } else {
+          await sendMessage(chatId, '❌ Укажите часы сна: /sync_sleep 7.5')
+        }
+        return success()
+      }
+
+      if (text?.startsWith('/sync_calories ')) {
+        const calories = parseInt(text.split(' ')[1])
+        if (calories && calories > 0 && calories < 5000) {
+          await syncHealthData(userId, 'active_calories', calories)
+          let message = `✅ Активность записана: ${calories} ккал 🔥`
+          
+          if (calories >= 500) {
+            message += `\n\n💪 Интенсивная тренировка!\nДобавил ${calories} ккал к вашей дневной норме.`
+          } else if (calories >= 300) {
+            message += `\n\n👍 Хорошая активность!`
+          }
+          
+          await sendMessageWithKeyboard(chatId, message, getMainKeyboard())
+        } else {
+          await sendMessage(chatId, '❌ Укажите сожженные калории: /sync_calories 450')
+        }
+        return success()
+      }
+      
       // Анализ текста
       if (text && !text.startsWith('/')) {
         // Проверяем, это параметры пользователя или цель
@@ -283,11 +358,11 @@ function parseTextResponse(text: string) {
   const numbers = text.match(/\d+\.?\d*/g) || []
   return {
     name: 'Анализ блюда',
-    calories: parseInt(numbers[0]) || 0,
-    protein: parseFloat(numbers[1]) || 0,
-    carbs: parseFloat(numbers[2]) || 0,
-    fat: parseFloat(numbers[3]) || 0,
-    weight: parseInt(numbers[4]) || 100
+    calories: parseInt(numbers[0] || '0') || 0,
+    protein: parseFloat(numbers[1] || '0') || 0,
+    carbs: parseFloat(numbers[2] || '0') || 0,
+    fat: parseFloat(numbers[3] || '0') || 0,
+    weight: parseInt(numbers[4] || '100') || 100
   }
 }
 
@@ -402,15 +477,29 @@ async function getDailyStats(userId: number) {
     .gte('created_at', `${today}T00:00:00`)
     .lte('created_at', `${today}T23:59:59`)
   
-  if (!meals || meals.length === 0) {
-    return '📊 Сегодня еще нет записей о еде.'
-  }
-  
   const { data: user } = await supabase
     .from('users')
     .select('*')
     .eq('user_id', userId)
     .single()
+  
+  // Получаем данные Apple Watch
+  const healthData = await getHealthData(userId)
+  
+  if (!meals || meals.length === 0) {
+    let message = '📊 Сегодня еще нет записей о еде.'
+    
+    // Показываем данные Apple Watch даже если еды нет
+    if (healthData) {
+      message += `\n\n⌚ Данные Apple Watch:`
+      if (healthData.steps) message += `\n👟 Шаги: ${healthData.steps.toLocaleString()}`
+      if (healthData.sleep_hours) message += `\n🛌 Сон: ${healthData.sleep_hours}ч`
+      if (healthData.active_calories) message += `\n🔥 Активность: ${healthData.active_calories} ккал`
+      if (healthData.weight) message += `\n⚖️ Вес: ${healthData.weight} кг`
+    }
+    
+    return message
+  }
   
   const total = meals.reduce((acc, meal) => ({
     calories: acc.calories + meal.calories,
@@ -419,14 +508,48 @@ async function getDailyStats(userId: number) {
     fat: acc.fat + meal.fat
   }), { calories: 0, protein: 0, carbs: 0, fat: 0 })
   
-  return `📊 Статистика за сегодня:
+  // Рассчитываем скорректированную норму калорий
+  const baseCalories = user?.calories_goal || 2000
+  const adjustedCalories = calculateAdjustedCalories(baseCalories, healthData)
+  
+  let caloriesText = `🔥 Калории: ${total.calories} / ${baseCalories}`
+  if (adjustedCalories !== baseCalories) {
+    caloriesText += ` (+${adjustedCalories - baseCalories} за активность)`
+  }
+  
+  let message = `📊 Статистика за сегодня:
 
-🔥 Калории: ${total.calories} / ${user?.calories_goal || 2000}
+${caloriesText}
 🥩 Белки: ${total.protein.toFixed(1)}г / ${user?.protein_goal || 150}г
 🍞 Углеводы: ${total.carbs.toFixed(1)}г / ${user?.carbs_goal || 200}г
 🥑 Жиры: ${total.fat.toFixed(1)}г / ${user?.fat_goal || 70}г
 
 📝 Приемов пищи: ${meals.length}`
+
+  // Добавляем данные Apple Watch
+  if (healthData) {
+    message += `\n\n⌚ Данные Apple Watch:`
+    if (healthData.steps) {
+      const emoji = healthData.steps >= 10000 ? '✅' : healthData.steps >= 5000 ? '👍' : '💪'
+      message += `\n${emoji} Шаги: ${healthData.steps.toLocaleString()}`
+    }
+    if (healthData.sleep_hours) {
+      const emoji = healthData.sleep_hours >= 7 ? '✅' : healthData.sleep_hours >= 6 ? '😴' : '⚠️'
+      message += `\n${emoji} Сон: ${healthData.sleep_hours}ч`
+    }
+    if (healthData.active_calories) {
+      message += `\n🔥 Активность: ${healthData.active_calories} ккал`
+    }
+    if (healthData.weight) {
+      message += `\n⚖️ Вес: ${healthData.weight} кг`
+    }
+    
+    message += `\n\n💡 Синхронизация:\n/sync_weight • /sync_steps • /sync_sleep • /sync_calories`
+  } else {
+    message += `\n\n⌚ Подключите Apple Watch:\n/sync_weight 75.5 • /sync_steps 12000`
+  }
+  
+  return message
 }
 
 function getGoalsMessage(userId: number) {
@@ -997,6 +1120,11 @@ function getWelcomeMessage() {
 • Ежедневные отчеты в 21:00
 • Напоминания о приемах пищи
 
+⌚ Интеграция Apple Watch:
+• Синхронизация веса, шагов, сна
+• Автокорректировка целей по активности
+• Учет сожженных калорий
+
 ⚙️ Настройки:
 • Укажите параметры (рост, вес, цель)
 • Я рассчитаю вашу норму калорий
@@ -1022,4 +1150,80 @@ function getWelcomeMessage() {
 Точный КБЖУ только при указании граммовок.
 
 Готовы начать? Расскажите о себе! 🚀`
+}
+
+// ⌚ Функции для работы с Apple Watch / Apple Health
+
+async function syncHealthData(userId: number, field: string, value: number) {
+  try {
+    const today = new Date().toISOString().split('T')[0]
+    
+    // Проверяем есть ли запись за сегодня
+    const { data: existing } = await supabase
+      .from('health_data')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('date', today)
+      .maybeSingle()
+    
+    if (existing) {
+      // Обновляем существующую запись
+      await supabase
+        .from('health_data')
+        .update({ [field]: value })
+        .eq('user_id', userId)
+        .eq('date', today)
+    } else {
+      // Создаем новую запись
+      await supabase
+        .from('health_data')
+        .insert({
+          user_id: userId,
+          date: today,
+          [field]: value
+        })
+    }
+  } catch (error) {
+    console.error('Sync health data error:', error)
+  }
+}
+
+async function getHealthData(userId: number) {
+  try {
+    const today = new Date().toISOString().split('T')[0]
+    
+    const { data } = await supabase
+      .from('health_data')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('date', today)
+      .maybeSingle()
+    
+    return data
+  } catch (error) {
+    return null
+  }
+}
+
+function calculateAdjustedCalories(baseCalories: number, healthData: any): number {
+  let adjusted = baseCalories
+  
+  // Добавляем калории за высокую активность (шаги)
+  if (healthData?.steps && healthData.steps >= 15000) {
+    adjusted += 300
+  } else if (healthData?.steps && healthData.steps >= 12000) {
+    adjusted += 200
+  }
+  
+  // Добавляем калории за недосып (стресс организма)
+  if (healthData?.sleep_hours && healthData.sleep_hours < 6) {
+    adjusted += 200
+  }
+  
+  // Добавляем сожженные калории с тренировок
+  if (healthData?.active_calories) {
+    adjusted += healthData.active_calories
+  }
+  
+  return adjusted
 }
