@@ -6,7 +6,144 @@ const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY')!
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY')!
 
+// Цены OpenAI API (за 1000 токенов)
+const OPENAI_PRICES = {
+  'gpt-4o': { input: 0.0025, output: 0.010 },        // $2.50/$10.00 per 1M tokens
+  'gpt-4o-mini': { input: 0.00015, output: 0.0006 }, // $0.15/$0.60 per 1M tokens
+  'whisper-1': 0.006 / 60                             // $0.006 per minute
+}
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+
+// Функции для работы с контекстом разговора
+async function addToContext(userId: number, role: 'user' | 'assistant', content: string) {
+  try {
+    const { data: user } = await supabase
+      .from('users')
+      .select('conversation_context')
+      .eq('user_id', userId)
+      .single()
+    
+    const context = user?.conversation_context || []
+    
+    // Добавляем новое сообщение
+    context.push({
+      role,
+      content,
+      timestamp: new Date().toISOString()
+    })
+    
+    // Ограничиваем контекст последними 10 сообщениями
+    const limitedContext = context.slice(-10)
+    
+    await supabase
+      .from('users')
+      .update({ conversation_context: limitedContext })
+      .eq('user_id', userId)
+      
+  } catch (error) {
+    console.error('Add context error:', error)
+  }
+}
+
+async function getContext(userId: number) {
+  try {
+    const { data: user } = await supabase
+      .from('users')
+      .select('conversation_context')
+      .eq('user_id', userId)
+      .single()
+    
+    return user?.conversation_context || []
+  } catch (error) {
+    console.error('Get context error:', error)
+    return []
+  }
+}
+
+async function clearContext(userId: number) {
+  try {
+    await supabase
+      .from('users')
+      .update({ conversation_context: [] })
+      .eq('user_id', userId)
+  } catch (error) {
+    console.error('Clear context error:', error)
+  }
+}
+
+// Функция для отслеживания расходов на OpenAI
+async function trackOpenAICost(userId: number, model: string, promptTokens: number, completionTokens: number, audioMinutes?: number) {
+  try {
+    let cost = 0
+    
+    if (model === 'whisper-1' && audioMinutes) {
+      // Whisper оплачивается за минуты
+      cost = audioMinutes * OPENAI_PRICES['whisper-1']
+    } else if (model === 'gpt-4o') {
+      // GPT-4o оплачивается за токены
+      cost = (promptTokens / 1000) * OPENAI_PRICES['gpt-4o'].input +
+             (completionTokens / 1000) * OPENAI_PRICES['gpt-4o'].output
+    } else if (model === 'gpt-4o-mini') {
+      // GPT-4o-mini оплачивается за токены
+      cost = (promptTokens / 1000) * OPENAI_PRICES['gpt-4o-mini'].input +
+             (completionTokens / 1000) * OPENAI_PRICES['gpt-4o-mini'].output
+    }
+    
+    // Обновляем статистику пользователя
+    const { data: user } = await supabase
+      .from('users')
+      .select('openai_cost_total, openai_requests_count')
+      .eq('user_id', userId)
+      .single()
+    
+    await supabase
+      .from('users')
+      .update({
+        openai_cost_total: (user?.openai_cost_total || 0) + cost,
+        openai_requests_count: (user?.openai_requests_count || 0) + 1,
+        last_request_at: new Date().toISOString()
+      })
+      .eq('user_id', userId)
+    
+    console.log(`User ${userId}: +$${cost.toFixed(4)} (total: $${((user?.openai_cost_total || 0) + cost).toFixed(4)})`)
+    
+    // Предупреждение при превышении лимита
+    const totalCost = (user?.openai_cost_total || 0) + cost
+    if (totalCost > 5.0) {
+      console.warn(`⚠️ User ${userId} exceeded $5 limit: $${totalCost.toFixed(2)}`)
+    }
+    
+  } catch (error) {
+    console.error('Track cost error:', error)
+  }
+}
+
+// Wrapper для вызовов OpenAI с отслеживанием стоимости
+async function callOpenAI(userId: number, requestBody: any) {
+  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${OPENAI_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(requestBody)
+  })
+  
+  const data = await response.json()
+  
+  // Отслеживаем расходы
+  if (data.usage) {
+    await trackOpenAICost(
+      userId,
+      requestBody.model,
+      data.usage.prompt_tokens,
+      data.usage.completion_tokens
+    )
+  }
+  
+  return data
+}
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -88,6 +225,31 @@ serve(async (req) => {
       if (text === '📊 Статистика' || text?.startsWith('/stats')) {
         const stats = await getDailyStats(userId)
         await sendMessageWithKeyboard(chatId, stats, getMainKeyboard())
+        return success()
+      }
+      
+      if (text?.startsWith('/cost')) {
+        const { data: user } = await supabase
+          .from('users')
+          .select('openai_cost_total, openai_requests_count, last_request_at')
+          .eq('user_id', userId)
+          .single()
+        
+        const costMessage = `💰 Статистика использования OpenAI API:
+
+📊 Общая стоимость: $${(user?.openai_cost_total || 0).toFixed(4)}
+🔢 Количество запросов: ${user?.openai_requests_count || 0}
+⏰ Последний запрос: ${user?.last_request_at ? new Date(user.last_request_at).toLocaleString('ru-RU') : 'Нет данных'}
+
+💡 Лимит: $5.00 на пользователя`
+        
+        await sendMessageWithKeyboard(chatId, costMessage, getMainKeyboard())
+        return success()
+      }
+      
+      if (text?.startsWith('/clear')) {
+        await clearContext(userId)
+        await sendMessageWithKeyboard(chatId, '🧹 Контекст разговора очищен! Теперь бот начнет диалог с чистого листа.', getMainKeyboard())
         return success()
       }
       
@@ -241,16 +403,92 @@ serve(async (req) => {
         }
         
         // Проверяем, это параметры пользователя или цель
-        const isUserParams = text.toLowerCase().includes('см') || 
-                            text.toLowerCase().includes('кг') ||
-                            text.toLowerCase().includes('вешу') ||
-                            text.toLowerCase().includes('рост') ||
-                            text.toLowerCase().includes('сбросить') ||
-                            text.toLowerCase().includes('набрать') ||
-                            text.toLowerCase().includes('зал') ||
-                            text.toLowerCase().includes('тренировки')
+        const isUserParams = (text.toLowerCase().includes('рост') && text.toLowerCase().includes('вес')) ||
+                            text.toLowerCase().includes('пересоберем') ||
+                            text.toLowerCase().includes('пересчитаем') ||
+                            text.toLowerCase().includes('калораж') ||
+                            text.toLowerCase().includes('параметры') ||
+                            text.toLowerCase().includes('записать') ||
+                            text.toLowerCase().includes('обнови') ||
+                            text.toLowerCase().includes('измени') ||
+                            text.toLowerCase().includes('заново') ||
+                            (text.toLowerCase().includes('похудеть') && text.toLowerCase().includes('кг')) ||
+                            (text.toLowerCase().includes('похудеть') && text.toLowerCase().includes('вес')) ||
+                            (text.match(/\d+\s*(см|м|метр)/i) && text.match(/\d+\s*кг/i))
         
-        if (isUserParams) {
+        // Проверяем, хочет ли пользователь изменить цели КБЖУ
+        const isGoalChange = text.toLowerCase().includes('хочу') && (
+          text.toLowerCase().includes('калори') ||
+          text.toLowerCase().includes('белк') ||
+          text.toLowerCase().includes('углевод') ||
+          text.toLowerCase().includes('жир') ||
+          text.toLowerCase().includes('цель') ||
+          text.toLowerCase().includes('норм')
+        ) || text.match(/\d+\s*(ккал|калори|белк|углевод|жир)/i)
+        
+        // Проверяем согласие на предложенные БЖУ
+        const isAcceptBJU = text.toLowerCase().includes('да') || 
+                           text.toLowerCase().includes('установи бжу') ||
+                           text.toLowerCase().includes('согласен') ||
+                           text.toLowerCase().includes('хорошо')
+        
+        // Проверяем, рассказывает ли о предпочтениях в еде
+        const isFoodPreferences = text.toLowerCase().includes('люблю') ||
+                                 text.toLowerCase().includes('нравится') ||
+                                 text.toLowerCase().includes('ем') ||
+                                 text.toLowerCase().includes('предпочитаю') ||
+                                 text.toLowerCase().includes('обожаю')
+        
+        if (isAcceptBJU) {
+          // Устанавливаем предложенные БЖУ
+          const { data: user } = await supabase
+            .from('users')
+            .select('calories_goal')
+            .eq('user_id', userId)
+            .single()
+          
+          if (user?.calories_goal) {
+            const calories = user.calories_goal
+            const protein = Math.round(calories * 0.25 / 4)
+            const carbs = Math.round(calories * 0.45 / 4)
+            const fat = Math.round(calories * 0.30 / 9)
+            
+            await supabase
+              .from('users')
+              .update({ 
+                protein_goal: protein,
+                carbs_goal: carbs,
+                fat_goal: fat
+              })
+              .eq('user_id', userId)
+            
+            await sendMessageWithKeyboard(chatId, 
+              `✅ Отлично! Установил сбалансированные пропорции:\n\n` +
+              `🔥 Калории: ${calories}\n` +
+              `🥩 Белки: ${protein}г (25%)\n` +
+              `🍞 Углеводы: ${carbs}г (45%)\n` +
+              `🥑 Жиры: ${fat}г (30%)\n\n` +
+              `Теперь у вас полноценный план! Хотите составить меню на день? 🍽️\n\n` +
+              `${calculateWaterRecommendation(user, null)}`, 
+              getMainKeyboard())
+          }
+        } else if (isFoodPreferences) {
+          // Составляем персональный план на основе предпочтений
+          await sendMessage(chatId, '🍽️ Отлично! Составляю персональный план питания...')
+          const mealPlan = await generatePersonalMealPlan(userId, text)
+          const { data: user } = await supabase
+            .from('users')
+            .select('*')
+            .eq('user_id', userId)
+            .single()
+          const waterRec = calculateWaterRecommendation(user, null)
+          await sendMessageWithKeyboard(chatId, mealPlan + '\n\n' + waterRec, getMainKeyboard())
+        } else if (isGoalChange) {
+          // Пользователь хочет изменить цели
+          await sendMessage(chatId, '🎯 Обновляю ваши цели по КБЖУ...')
+          const result = await updateUserGoals(userId, text)
+          await sendMessageWithKeyboard(chatId, result, getMainKeyboard())
+        } else if (isUserParams) {
           // Обновляем параметры пользователя
           await sendMessage(chatId, '📝 Обновляю ваши параметры и цели...')
           const result = await updateUserParams(userId, text)
@@ -260,12 +498,33 @@ serve(async (req) => {
           const isQuestion = text.toLowerCase().includes('что') || 
                             text.toLowerCase().includes('посоветуй') ||
                             text.toLowerCase().includes('предложи') ||
-                            text.toLowerCase().includes('?')
+                            text.toLowerCase().includes('?') ||
+                            text.toLowerCase().includes('хочу') ||
+                            text.toLowerCase().includes('можно') ||
+                            text.toLowerCase().includes('рекомендуй') ||
+                            text.toLowerCase().includes('совет') ||
+                            text.toLowerCase().includes('помоги') ||
+                            text.toLowerCase().includes('что-то') ||
+                            text.toLowerCase().includes('ничего') ||
+                            text.toLowerCase().includes('порекомендуй') ||
+                            text.toLowerCase().includes('что бы') ||
+                            text.toLowerCase().includes('что мне') ||
+                            text.toLowerCase().includes('не знаю') ||
+                            text.toLowerCase().includes('выбор') ||
+                            text.toLowerCase().includes('вариант')
           
           if (isQuestion) {
             // Даем совет или рецепт
             await sendMessage(chatId, '🤔 Анализирую ваш рацион и подбираю рекомендации...')
+            
+            // Сохраняем вопрос пользователя в контекст
+            await addToContext(userId, 'user', text)
+            
             const advice = await getSmartAdvice(userId, text)
+            
+            // Сохраняем ответ бота в контекст
+            await addToContext(userId, 'assistant', advice)
+            
             await sendMessageWithKeyboard(chatId, advice, getMainKeyboard())
           } else {
             // Обычный анализ еды
@@ -325,9 +584,66 @@ serve(async (req) => {
         
         if (text) {
           await sendMessage(chatId, `📝 Распознано: ${text}`)
-          const analysis = await analyzeFoodText(text)
-          await saveMeal(userId, analysis)
-          await sendMessage(chatId, formatAnalysis(analysis))
+          
+          // Проверяем, это запрос на обновление параметров
+          const isUserParams = (text.toLowerCase().includes('рост') && text.toLowerCase().includes('вес')) ||
+                              text.toLowerCase().includes('пересоберем') ||
+                              text.toLowerCase().includes('пересчитаем') ||
+                              text.toLowerCase().includes('калораж') ||
+                              text.toLowerCase().includes('параметры') ||
+                              text.toLowerCase().includes('записать') ||
+                              text.toLowerCase().includes('обнови') ||
+                              text.toLowerCase().includes('измени') ||
+                              text.toLowerCase().includes('заново') ||
+                              (text.toLowerCase().includes('похудеть') && text.toLowerCase().includes('кг')) ||
+                              (text.toLowerCase().includes('похудеть') && text.toLowerCase().includes('вес')) ||
+                              (text.match(/\d+\s*(см|м|метр)/i) && text.match(/\d+\s*кг/i))
+          
+          // Проверяем, это запрос на совет или описание еды
+          const isAdviceRequest = !isUserParams && (
+                                 text.toLowerCase().includes('что') || 
+                                 text.toLowerCase().includes('хочу') ||
+                                 text.toLowerCase().includes('можно') ||
+                                 text.toLowerCase().includes('рекомендуй') ||
+                                 text.toLowerCase().includes('совет') ||
+                                 text.toLowerCase().includes('помоги') ||
+                                 text.toLowerCase().includes('что-то') ||
+                                 text.toLowerCase().includes('ничего') ||
+                                 text.toLowerCase().includes('порекомендуй') ||
+                                 text.toLowerCase().includes('что бы') ||
+                                 text.toLowerCase().includes('что мне')
+                               )
+          
+          if (isUserParams) {
+            // Это запрос на обновление параметров
+            await sendMessage(chatId, '📝 Обновляю ваши параметры и цели...')
+            const result = await updateUserParams(userId, text)
+            await sendMessageWithKeyboard(chatId, result, getMainKeyboard())
+          } else           if (isAdviceRequest) {
+            // Это запрос на совет - даем рекомендации
+            await sendMessage(chatId, '🤔 Анализирую ваш рацион и подбираю рекомендации...')
+            
+            // Сохраняем вопрос пользователя в контекст
+            await addToContext(userId, 'user', text)
+            
+            const advice = await getSmartAdvice(userId, text)
+            
+            // Сохраняем ответ бота в контекст
+            await addToContext(userId, 'assistant', advice)
+            
+            await sendMessageWithKeyboard(chatId, advice, getMainKeyboard())
+          } else {
+            // Это описание еды - анализируем и сохраняем
+            const analysis = await analyzeFoodText(text)
+            await saveMeal(userId, analysis)
+            await sendMessage(chatId, formatAnalysis(analysis))
+            
+            // Даем совет после еды
+            const advice = await getAdviceAfterMeal(userId, analysis)
+            if (advice) {
+              await sendMessage(chatId, advice)
+            }
+          }
         } else {
           await sendMessage(chatId, '❌ Не удалось распознать голосовое сообщение')
         }
@@ -959,7 +1275,9 @@ async function getRecipeSuggestion(userId: number) {
 Приготовление:
 краткое описание
 
-КБЖУ на порцию: XXX ккал, XXг/XXг/XXг`
+КБЖУ на порцию: XXX ккал, XXг/XXг/XXг
+
+💧 ВОДА: ${Math.round(user.calories_goal * 0.4)}мл в день (0.4мл на ккал)`
     
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
@@ -1035,6 +1353,9 @@ async function getAdviceAfterMeal(userId: number, meal: any) {
       }
     }
     
+    // Добавляем рекомендации по воде
+    advice += `\n\n💧 ВОДА: ${Math.round(user.calories_goal * 0.4)}мл в день (0.4мл на ккал)`
+    
     return advice
   } catch (error) {
     console.error('Advice error:', error)
@@ -1047,12 +1368,17 @@ async function updateUserParams(userId: number, text: string) {
     const prompt = `Извлеки параметры пользователя из текста: "${text}"
 
 Найди:
-- Рост в см
-- Вес в кг  
+- Рост в см (например: "метр девяносто три", "193 см", "сто девяносто три")
+- Вес в кг (например: "сто десять", "110 кг", "сто десять килограмм")
 - Цель (сбросить/набрать вес)
-- Количество кг для сброса/набора
-- Активность (зал, тренировки, спорт)
+- Количество кг для сброса/набора (например: "хочу вес где-то девяносто восемь" = сбросить до 98кг)
+- Активность (зал, тренировки, спорт, силовые)
+  * "high" - если тренируется 3+ раза в неделю или "два-три раза в неделю"
+  * "medium" - если тренируется 1-2 раза в неделю
+  * "low" - если не тренируется или редко
 - Возраст (если указан)
+
+ВАЖНО: Учитывай разговорную речь и числительные словами!
 
 Ответь ТОЛЬКО в JSON:
 {
@@ -1075,7 +1401,7 @@ async function updateUserParams(userId: number, text: string) {
       body: JSON.stringify({
         model: 'gpt-4o',
         messages: [
-          { role: 'system', content: 'Ты извлекаешь параметры пользователя из текста. Отвечай только в JSON.' },
+          { role: 'system', content: 'Ты извлекаешь параметры пользователя из текста. Отвечай СТРОГО в формате JSON без markdown блоков. Просто чистый JSON объект.' },
           { role: 'user', content: prompt }
         ],
         max_tokens: 200
@@ -1084,7 +1410,17 @@ async function updateUserParams(userId: number, text: string) {
     
     const data = await response.json()
     const content = data.choices?.[0]?.message?.content
-    const params = JSON.parse(content)
+    
+    if (!content) {
+      console.error('Empty content from OpenAI')
+      return '❌ Не удалось обработать параметры. Попробуйте еще раз.'
+    }
+    
+    // Очищаем JSON от markdown блоков
+    const cleanContent = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
+    
+    console.log('Parsing params:', cleanContent)
+    const params = JSON.parse(cleanContent)
     
     // Вычисляем цели по КБЖУ на основе параметров
     const goals = calculateNutritionGoals(params)
@@ -1230,6 +1566,9 @@ async function getSmartAdvice(userId: number, question: string) {
       return '❌ Сначала используйте /start'
     }
     
+    // Получаем контекст разговора
+    const context = await getContext(userId)
+    
     const today = new Date().toISOString().split('T')[0]
     const { data: meals } = await supabase
       .from('meals')
@@ -1255,6 +1594,10 @@ async function getSmartAdvice(userId: number, question: string) {
     
     const userInfo = user.height ? `Пользователь: ${user.height}см, ${user.weight}кг, цель ${user.goal === 'lose' ? 'сбросить' : 'набрать'} вес` : ''
     
+    // Формируем контекст для промпта
+    const contextText = context.length > 0 ? 
+      `\n\nКОНТЕКСТ РАЗГОВОРА (последние сообщения):\n${context.map(c => `${c.role === 'user' ? 'Пользователь' : 'Ассистент'}: ${c.content}`).join('\n')}` : ''
+    
     const prompt = `Ты нутрициолог в Telegram. Пользователь спрашивает: "${question}"
 
 ${userInfo}
@@ -1264,12 +1607,12 @@ ${userInfo}
 
 Цели на день: ${user.calories_goal} ккал, ${user.protein_goal}г белка, ${user.carbs_goal}г углеводов, ${user.fat_goal}г жиров
 
-Осталось до цели: ${remaining.calories} ккал, ${remaining.protein.toFixed(0)}г белка
+Осталось до цели: ${remaining.calories} ккал, ${remaining.protein.toFixed(0)}г белка${contextText}
 
-ВАЖНО: Форматирование для Telegram!
-- НЕ используй markdown (* _ -)
-- НЕ используй **жирный** или *курсив*
-- Используй только эмодзи и простой текст
+ВАЖНО: 
+- Учитывай контекст предыдущих сообщений
+- Если пользователь критикует предложенные ранее цели - скорректируй их
+- Форматирование для Telegram (без markdown)
 - Короткие абзацы
 
 Дай совет в таком формате:
@@ -1288,7 +1631,9 @@ ${userInfo}
 • [почему это подходит]
 
 💡 Главный совет:
-[что важнее всего сейчас]`
+[что важнее всего сейчас]
+
+💧 ВОДА: ${Math.round(user.calories_goal * 0.4)}мл в день (0.4мл на ккал)`
     
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
@@ -1529,19 +1874,29 @@ function calculateAdjustedCalories(baseCalories: number, healthData: any): numbe
 
 async function updateUserGoals(userId: number, goalsText: string) {
   try {
-    // Парсим цели из текста
-    const caloriesMatch = goalsText.match(/(\d+)\s*ккал|калори/i)
-    const proteinMatch = goalsText.match(/(\d+)\s*г?\s*бел|протеин/i)
-    const carbsMatch = goalsText.match(/(\d+)\s*г?\s*угл|карб/i)
-    const fatMatch = goalsText.match(/(\d+)\s*г?\s*жир/i)
+    // Парсим цели из текста - более гибкие паттерны
+    const caloriesMatch = goalsText.match(/(\d+)\s*(ккал|калори|ккал\/день)/i)
+    const proteinMatch = goalsText.match(/(\d+)\s*(г\s*)?(белк|протеин)/i)
+    const carbsMatch = goalsText.match(/(\d+)\s*(г\s*)?(углевод|карб)/i)
+    const fatMatch = goalsText.match(/(\d+)\s*(г\s*)?(жир)/i)
     
-    const calories = caloriesMatch ? parseInt(caloriesMatch[1]) : null
-    const protein = proteinMatch ? parseInt(proteinMatch[1]) : null
-    const carbs = carbsMatch ? parseInt(carbsMatch[1]) : null
-    const fat = fatMatch ? parseInt(fatMatch[1]) : null
+    // Дополнительные паттерны для естественной речи
+    const caloriesAltMatch = goalsText.match(/(\d+)\s*(в день|на день|калорий)/i)
+    const proteinAltMatch = goalsText.match(/белк[а-я]*\s*(\d+)/i)
+    const carbsAltMatch = goalsText.match(/углевод[а-я]*\s*(\d+)/i)
+    const fatAltMatch = goalsText.match(/жир[а-я]*\s*(\d+)/i)
+    
+    const calories = caloriesMatch ? parseInt(caloriesMatch[1]) : 
+                    caloriesAltMatch ? parseInt(caloriesAltMatch[1]) : null
+    const protein = proteinMatch ? parseInt(proteinMatch[1]) : 
+                   proteinAltMatch ? parseInt(proteinAltMatch[1]) : null
+    const carbs = carbsMatch ? parseInt(carbsMatch[1]) : 
+                 carbsAltMatch ? parseInt(carbsAltMatch[1]) : null
+    const fat = fatMatch ? parseInt(fatMatch[1]) : 
+               fatAltMatch ? parseInt(fatAltMatch[1]) : null
     
     if (!calories && !protein && !carbs && !fat) {
-      return '❌ Не удалось распознать цели. Используйте формат:\n/setgoals 2500 ккал, 150г белка, 200г углеводов, 70г жиров'
+      return '❌ Не удалось распознать цели. Попробуйте:\n\n"Хочу 9000 калорий в день"\n"Установи 150г белка"\n"Норма 2500 ккал, 200г углеводов"'
     }
     
     // Обновляем только указанные цели
@@ -1561,6 +1916,21 @@ async function updateUserGoals(userId: number, goalsText: string) {
     if (protein) message += `🥩 Белки: ${protein}г\n`
     if (carbs) message += `🍞 Углеводы: ${carbs}г\n`
     if (fat) message += `🥑 Жиры: ${fat}г\n`
+    
+    // Если изменили только калории, предлагаем БЖУ
+    if (calories && !protein && !carbs && !fat) {
+      const suggestedProtein = Math.round(calories * 0.25 / 4) // 25% от калорий
+      const suggestedCarbs = Math.round(calories * 0.45 / 4)  // 45% от калорий
+      const suggestedFat = Math.round(calories * 0.30 / 9)    // 30% от калорий
+      
+      message += `\n💡 Предлагаю БЖУ для ${calories} ккал:\n`
+      message += `🥩 Белки: ${suggestedProtein}г (25%)\n`
+      message += `🍞 Углеводы: ${suggestedCarbs}г (45%)\n`
+      message += `🥑 Жиры: ${suggestedFat}г (30%)\n\n`
+      message += `Хотите установить эти пропорции? Напишите "да" или "установи БЖУ"\n\n`
+      message += `Или скажите что любите есть - я составлю персональный план! 🍽️\n\n`
+      message += `💧 И не забывайте пить воду! Рекомендую ${Math.round(calories * 0.4)}мл в день (0.4мл на ккал)`
+    }
     
     return message
   } catch (error) {
@@ -1620,4 +1990,68 @@ function calculateWaterRecommendation(user: any, healthData: any): string {
   message += `• Вечером: ${Math.round(totalWater * 0.3)}мл (30%)`
   
   return message
+}
+
+async function generatePersonalMealPlan(userId: number, preferences: string) {
+  try {
+    const { data: user } = await supabase
+      .from('users')
+      .select('*')
+      .eq('user_id', userId)
+      .single()
+    
+    if (!user) return '❌ Сначала настройте параметры'
+    
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o',
+        messages: [
+          {
+            role: 'system',
+            content: `Ты персональный нутрициолог. Составляешь план питания на основе предпочтений пользователя.
+
+ЦЕЛИ ПОЛЬЗОВАТЕЛЯ:
+- Калории: ${user.calories_goal}
+- Белки: ${user.protein_goal}г
+- Углеводы: ${user.carbs_goal}г  
+- Жиры: ${user.fat_goal}г
+- Цель: ${user.goal === 'lose' ? 'сбросить вес' : user.goal === 'gain' ? 'набрать вес' : 'поддержать вес'}
+
+ПРЕДПОЧТЕНИЯ: ${preferences}
+
+Составь план на день с учетом предпочтений. Укажи точные граммовки и КБЖУ каждого блюда.
+
+ФОРМАТ:
+🌅 ЗАВТРАК: [название] - [граммовки] = [КБЖУ]
+☀️ ОБЕД: [название] - [граммовки] = [КБЖУ]  
+🌆 УЖИН: [название] - [граммовки] = [КБЖУ]
+🍎 ПЕРЕКУСЫ: [название] - [граммовки] = [КБЖУ]
+
+ИТОГО: [общее КБЖУ]
+
+💧 ВОДА: ${Math.round(user.calories_goal * 0.4)}мл в день (0.4мл на ккал)
+
+Не используй markdown!`
+          },
+          {
+            role: 'user',
+            content: `Составь мне план питания на день с учетом моих предпочтений: ${preferences}`
+          }
+        ],
+        max_tokens: 800,
+        temperature: 0.7
+      })
+    })
+    
+    const data = await response.json()
+    return data.choices[0].message.content
+  } catch (error) {
+    console.error('Personal meal plan error:', error)
+    return '❌ Ошибка при составлении плана питания'
+  }
 }
