@@ -115,6 +115,30 @@ serve(async (req) => {
         return success()
       }
       
+      // Команда для изменения целей по КБЖУ
+      if (text?.startsWith('/setgoals ')) {
+        const goalsText = text.replace('/setgoals ', '')
+        const result = await updateUserGoals(userId, goalsText)
+        await sendMessageWithKeyboard(chatId, result, getMainKeyboard())
+        return success()
+      }
+      
+      // Команда для быстрого изменения калорий
+      if (text?.startsWith('/calories ')) {
+        const calories = parseInt(text.replace('/calories ', ''))
+        if (calories && calories > 500 && calories < 10000) {
+          await supabase
+            .from('users')
+            .update({ calories_goal: calories })
+            .eq('user_id', userId)
+          
+          await sendMessageWithKeyboard(chatId, `✅ Цель по калориям обновлена: ${calories} ккал/день`, getMainKeyboard())
+        } else {
+          await sendMessage(chatId, '❌ Укажите корректное количество калорий: /calories 2500')
+        }
+        return success()
+      }
+      
       // Синхронизация данных Apple Watch / Apple Health
       if (text?.startsWith('/sync_weight ')) {
         const weight = parseFloat(text.split(' ')[1])
@@ -1363,6 +1387,10 @@ function getUserParamsText(user: any) {
 
 💡 Чтобы изменить параметры, просто напишите новые данные одним сообщением.
 
+🎯 Команды для изменения целей:
+• /calories 9000 - изменить калории
+• /setgoals 2500 ккал, 150г белка, 200г углеводов, 70г жиров
+
 ⚠️ Помните: аналитика примерная!
 Для точного расчета указывайте граммовки продуктов.`
 }
@@ -1497,6 +1525,48 @@ function calculateAdjustedCalories(baseCalories: number, healthData: any): numbe
   }
   
   return adjusted
+}
+
+async function updateUserGoals(userId: number, goalsText: string) {
+  try {
+    // Парсим цели из текста
+    const caloriesMatch = goalsText.match(/(\d+)\s*ккал|калори/i)
+    const proteinMatch = goalsText.match(/(\d+)\s*г?\s*бел|протеин/i)
+    const carbsMatch = goalsText.match(/(\d+)\s*г?\s*угл|карб/i)
+    const fatMatch = goalsText.match(/(\d+)\s*г?\s*жир/i)
+    
+    const calories = caloriesMatch ? parseInt(caloriesMatch[1]) : null
+    const protein = proteinMatch ? parseInt(proteinMatch[1]) : null
+    const carbs = carbsMatch ? parseInt(carbsMatch[1]) : null
+    const fat = fatMatch ? parseInt(fatMatch[1]) : null
+    
+    if (!calories && !protein && !carbs && !fat) {
+      return '❌ Не удалось распознать цели. Используйте формат:\n/setgoals 2500 ккал, 150г белка, 200г углеводов, 70г жиров'
+    }
+    
+    // Обновляем только указанные цели
+    const updateData: any = {}
+    if (calories) updateData.calories_goal = calories
+    if (protein) updateData.protein_goal = protein
+    if (carbs) updateData.carbs_goal = carbs
+    if (fat) updateData.fat_goal = fat
+    
+    await supabase
+      .from('users')
+      .update(updateData)
+      .eq('user_id', userId)
+    
+    let message = '✅ Цели обновлены:\n\n'
+    if (calories) message += `🔥 Калории: ${calories}\n`
+    if (protein) message += `🥩 Белки: ${protein}г\n`
+    if (carbs) message += `🍞 Углеводы: ${carbs}г\n`
+    if (fat) message += `🥑 Жиры: ${fat}г\n`
+    
+    return message
+  } catch (error) {
+    console.error('Update goals error:', error)
+    return '❌ Ошибка при обновлении целей'
+  }
 }
 
 function calculateWaterRecommendation(user: any, healthData: any): string {
