@@ -59,30 +59,46 @@ const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`
 
 // Функции для работы с состояниями через Supabase
 async function getUserState(userId: number) {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('user_states')
     .select('*')
     .eq('telegram_id', userId)
-    .single()
+    .maybeSingle()
   
-  if (data && data.state_data) {
-    return { state: data.state_name, data: data.state_data }
+  if (error) {
+    console.error('Error getting user state:', error)
+    return null
   }
+  
+  if (data) {
+    console.log('User state loaded:', userId, data.state_name, data.state_data)
+    return { state: data.state_name, data: data.state_data || {} }
+  }
+  
+  console.log('No state found for user:', userId)
   return null
 }
 
 async function setUserState(userId: number, state: string, data: any) {
-  await supabase
+  console.log('Setting user state:', userId, state, data)
+  const { error } = await supabase
     .from('user_states')
     .upsert({
       telegram_id: userId,
       state_name: state,
       state_data: data,
       updated_at: new Date().toISOString()
+    }, {
+      onConflict: 'telegram_id'
     })
+  
+  if (error) {
+    console.error('Error setting user state:', error)
+  }
 }
 
 async function clearUserState(userId: number) {
+  console.log('Clearing user state:', userId)
   await supabase
     .from('user_states')
     .delete()
@@ -103,13 +119,28 @@ async function sendMessage(chatId: number, text: string, replyMarkup?: any): Pro
     payload.reply_markup = replyMarkup
   }
   
-  const response = await fetch(`${TELEGRAM_API}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
-  })
+  console.log('Sending message to chat:', chatId, 'length:', text.length)
   
-  return await response.json()
+  try {
+    const response = await fetch(`${TELEGRAM_API}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+    
+    const result = await response.json()
+    
+    if (!response.ok) {
+      console.error('Telegram API error:', result)
+      throw new Error(`Telegram API error: ${result.description}`)
+    }
+    
+    console.log('Message sent successfully')
+    return result
+  } catch (error) {
+    console.error('Error sending message:', error)
+    throw error
+  }
 }
 
 /**
@@ -230,31 +261,52 @@ ${profileData.wishes ? `- Пожелания клиента: "${profileData.wish
     "activity_recommendations": "рекомендации по активности с учетом пожеланий клиента"
 }`
 
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${OPENAI_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: 'gpt-4o-mini',
-      messages: [
-        {
-          role: 'system',
-          content: 'Ты C.I.D. - опытный диетолог и тренер. Всегда отвечай на русском языке в формате JSON.'
-        },
-        {
-          role: 'user',
-          content: prompt
-        }
-      ],
-      temperature: 0.7,
-      response_format: { type: 'json_object' }
+  console.log('Calling OpenAI API for nutrition plan...')
+  
+  try {
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: 'Ты C.I.D. - опытный диетолог и тренер. Всегда отвечай на русском языке в формате JSON.'
+          },
+          {
+            role: 'user',
+            content: prompt
+          }
+        ],
+        temperature: 0.7,
+        response_format: { type: 'json_object' },
+        max_tokens: 1000
+      })
     })
-  })
 
-  const data = await response.json()
-  return JSON.parse(data.choices[0].message.content)
+    if (!response.ok) {
+      const errorText = await response.text()
+      console.error('OpenAI API error:', response.status, errorText)
+      throw new Error(`OpenAI API error: ${response.status}`)
+    }
+
+    const data = await response.json()
+    console.log('OpenAI response received')
+    
+    if (!data.choices || !data.choices[0] || !data.choices[0].message) {
+      console.error('Invalid OpenAI response:', data)
+      throw new Error('Invalid OpenAI response')
+    }
+    
+    return JSON.parse(data.choices[0].message.content)
+  } catch (error) {
+    console.error('Error in generateNutritionPlan:', error)
+    throw error
+  }
 }
 
 /**
@@ -319,21 +371,30 @@ async function adjustNutritionPlan(currentPlan: any, userRequest: string, profil
  * Форматирование карточки КБЖУ
  */
 function formatNutritionCard(plan: any, profileData: any): string {
-  return `📊 **КАРТОЧКА КБЖУ ДЛЯ ${profileData.name?.toUpperCase()}**
+  const name = profileData.name || 'Клиент'
+  const calories = plan.target_calories || plan.calories || 0
+  const protein = plan.protein_grams || plan.protein || 0
+  const fats = plan.fats_grams || plan.fats || 0
+  const carbs = plan.carbs_grams || plan.carbs || 0
+  const water = plan.water_liters || plan.water || 2
+  const bmr = plan.bmr || 0
+  const tdee = plan.tdee || 0
+  
+  return `📊 *КАРТОЧКА КБЖУ ДЛЯ ${name.toUpperCase()}*
 
-🔥 Калории: **${plan.calories}** ккал/день
-🥩 Белки: **${plan.protein}** г
-🥑 Жиры: **${plan.fats}** г
-🍞 Углеводы: **${plan.carbs}** г
-💧 Вода: **${plan.water}** л/день
+🔥 Калории: *${calories}* ккал/день
+🥩 Белки: *${protein}* г
+🥑 Жиры: *${fats}* г
+🍞 Углеводы: *${carbs}* г
+💧 Вода: *${water}* л/день
 
-📈 **Метаболизм:**
-• Базовый (BMR): ${plan.bmr.toFixed(0)} ккал/день
-• Общий расход (TDEE): ${plan.tdee.toFixed(0)} ккал/день
+📈 *Метаболизм:*
+• Базовый (BMR): ${bmr.toFixed(0)} ккал/день
+• Общий расход (TDEE): ${tdee.toFixed(0)} ккал/день
 
-${plan.methodology_explanation}
+${plan.methodology_explanation || ''}
 
-💪 **Рекомендации по активности:**
+💪 *Рекомендации по активности:*
 ${plan.activity_recommendations || 'Следуйте вашей текущей программе тренировок'}
 `
 }
@@ -572,6 +633,8 @@ async function handleTextMessage(message: TelegramMessage) {
   const userId = message.from.id
   const stateData = await getUserState(userId)
   
+  console.log('handleTextMessage - userId:', userId, 'text:', message.text, 'state:', stateData?.state)
+  
   if (!stateData) {
     await sendMessage(message.chat.id, "Используй /start для начала работы")
     return
@@ -585,6 +648,7 @@ async function handleTextMessage(message: TelegramMessage) {
   
   // Ожидание имени
   if (stateData.state === 'waiting_name') {
+    console.log('Processing name:', message.text)
     stateData.data.name = message.text
     stateData.state = 'waiting_gender'
     await setUserState(userId, stateData.state, stateData.data)
@@ -597,6 +661,7 @@ async function handleTextMessage(message: TelegramMessage) {
   
   // Ожидание возраста
   else if (stateData.state === 'waiting_age') {
+    console.log('Processing age:', message.text)
     const age = parseInt(message.text)
     if (isNaN(age) || age < 10 || age > 120) {
       await sendMessage(message.chat.id, "❌ Пожалуйста, укажи корректный возраст (10-120 лет)")
@@ -647,10 +712,13 @@ async function handleTextMessage(message: TelegramMessage) {
     
     // Генерируем план через OpenAI
     try {
+      console.log('Generating nutrition plan for user:', user.id, stateData.data)
       const plan = await generateNutritionPlan(stateData.data)
+      console.log('Plan generated:', plan)
       
       // Сохраняем профиль
-      const { data: profile } = await supabase
+      console.log('Saving user profile...')
+      const { data: profile, error: profileError } = await supabase
         .from('user_profiles')
         .upsert({
           user_id: user.id,
@@ -659,13 +727,26 @@ async function handleTextMessage(message: TelegramMessage) {
         .select()
         .single()
       
-      // Сохраняем план
-      await supabase
+      if (profileError) {
+        console.error('Error saving profile:', profileError)
+        throw profileError
+      }
+      console.log('Profile saved:', profile)
+      
+      // Деактивируем старые планы
+      console.log('Deactivating old plans...')
+      const { error: deactivateError } = await supabase
         .from('nutrition_plans')
         .update({ is_active: false })
         .eq('user_id', user.id)
       
-      await supabase
+      if (deactivateError) {
+        console.error('Error deactivating old plans:', deactivateError)
+      }
+      
+      // Сохраняем новый план
+      console.log('Saving new nutrition plan...')
+      const { data: savedPlan, error: planError } = await supabase
         .from('nutrition_plans')
         .insert({
           user_id: user.id,
@@ -680,11 +761,24 @@ async function handleTextMessage(message: TelegramMessage) {
           activity_recommendations: plan.activity_recommendations,
           is_active: true
         })
+        .select()
+        .single()
       
+      if (planError) {
+        console.error('Error saving plan:', planError)
+        throw planError
+      }
+      console.log('Plan saved:', savedPlan)
+      
+      // Формируем и отправляем карточку
+      console.log('Formatting nutrition card...')
       const cardText = formatNutritionCard(plan, stateData.data)
+      console.log('Sending card to user...')
       await sendMessage(message.chat.id, cardText, nutritionCardKeyboard())
+      console.log('Card sent successfully')
       
       await clearUserState(userId)
+      console.log('Onboarding completed for user:', userId)
     } catch (error) {
       console.error('Error generating plan:', error)
       await sendMessage(message.chat.id, "❌ Ошибка создания плана. Попробуй еще раз /start")
@@ -785,7 +879,8 @@ serve(async (req) => {
     const update: TelegramUpdate = await req.json()
     console.log('Received update:', update.update_id)
     
-    handleUpdate(update).catch(err => console.error('Error in handleUpdate:', err))
+    // ВАЖНО: Ждем завершения обработки перед ответом
+    await handleUpdate(update)
     
     return new Response(
       JSON.stringify({ ok: true }),
