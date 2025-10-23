@@ -57,8 +57,37 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 // Telegram API базовый URL
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`
 
-// Хранилище состояний пользователей (в продакшене лучше использовать Redis)
-const userStates = new Map<number, { state: string, data: any }>()
+// Функции для работы с состояниями через Supabase
+async function getUserState(userId: number) {
+  const { data } = await supabase
+    .from('user_states')
+    .select('*')
+    .eq('telegram_id', userId)
+    .single()
+  
+  if (data && data.state_data) {
+    return { state: data.state_name, data: data.state_data }
+  }
+  return null
+}
+
+async function setUserState(userId: number, state: string, data: any) {
+  await supabase
+    .from('user_states')
+    .upsert({
+      telegram_id: userId,
+      state_name: state,
+      state_data: data,
+      updated_at: new Date().toISOString()
+    })
+}
+
+async function clearUserState(userId: number) {
+  await supabase
+    .from('user_states')
+    .delete()
+    .eq('telegram_id', userId)
+}
 
 /**
  * Отправка сообщения в Telegram
@@ -431,7 +460,7 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
   
   // Начало заполнения профиля
   if (data === 'fill_profile') {
-    userStates.set(userId, { state: 'waiting_name', data: {} })
+    await setUserState(userId, 'waiting_name', {})
     await editMessageText(
       chatId,
       messageId,
@@ -442,38 +471,52 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
   // Выбор пола
   else if (data.startsWith('gender_')) {
     const gender = data.split('_')[1]
-    const state = userStates.get(userId)
-    if (state) {
-      state.data.gender = gender
-      state.state = 'waiting_age'
-      userStates.set(userId, state)
-      await editMessageText(chatId, messageId, "🎂 Сколько тебе лет?")
+    const stateData = await getUserState(userId)
+    if (stateData) {
+      stateData.data.gender = gender
+      stateData.state = 'waiting_age'
+      await setUserState(userId, stateData.state, stateData.data)
+      await sendMessage(chatId, "🎂 Сколько тебе лет?")
+    } else {
+      // Если состояния нет, создаем заново
+      await setUserState(userId, 'waiting_age', { gender })
+      await sendMessage(chatId, "🎂 Сколько тебе лет?")
     }
   }
   
   // Выбор активности
   else if (data.startsWith('activity_')) {
     const activity = data.split('_')[1]
-    const state = userStates.get(userId)
-    if (state) {
-      state.data.activity_level = activity
-      state.state = 'waiting_goal'
-      userStates.set(userId, state)
-      await editMessageText(chatId, messageId, "🎯 Какая у тебя цель?", goalKeyboard())
+    const stateData = await getUserState(userId)
+    if (stateData) {
+      stateData.data.activity_level = activity
+      stateData.state = 'waiting_goal'
+      await setUserState(userId, stateData.state, stateData.data)
+      await sendMessage(chatId, "🎯 Какая у тебя цель?", goalKeyboard())
+    } else {
+      // Если состояния нет, создаем заново
+      await setUserState(userId, 'waiting_goal', { activity_level: activity })
+      await sendMessage(chatId, "🎯 Какая у тебя цель?", goalKeyboard())
     }
   }
   
   // Выбор цели
   else if (data.startsWith('goal_')) {
     const goal = data.split('_')[1]
-    const state = userStates.get(userId)
-    if (state) {
-      state.data.goal = goal
-      state.state = 'waiting_wishes'
-      userStates.set(userId, state)
-      await editMessageText(
+    const stateData = await getUserState(userId)
+    if (stateData) {
+      stateData.data.goal = goal
+      stateData.state = 'waiting_wishes'
+      await setUserState(userId, stateData.state, stateData.data)
+      await sendMessage(
         chatId,
-        messageId,
+        `💭 **Пожелания:**\n\nОпиши свои цели подробнее.\nНапример: "хочу стать рельефным" или "хочу стать сильнее"\n\nМожешь написать текстом или отправить голосовое сообщение.`
+      )
+    } else {
+      // Если состояния нет, создаем заново
+      await setUserState(userId, 'waiting_wishes', { goal })
+      await sendMessage(
+        chatId,
         `💭 **Пожелания:**\n\nОпиши свои цели подробнее.\nНапример: "хочу стать рельефным" или "хочу стать сильнее"\n\nМожешь написать текстом или отправить голосовое сообщение.`
       )
     }
@@ -504,7 +547,7 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
   
   // Корректировка карточки
   else if (data === 'adjust_card') {
-    userStates.set(userId, { state: 'waiting_adjustment', data: {} })
+    await setUserState(userId, 'waiting_adjustment', {})
     await editMessageText(
       chatId,
       messageId,
@@ -527,9 +570,9 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
  */
 async function handleTextMessage(message: TelegramMessage) {
   const userId = message.from.id
-  const state = userStates.get(userId)
+  const stateData = await getUserState(userId)
   
-  if (!state) {
+  if (!stateData) {
     await sendMessage(message.chat.id, "Используй /start для начала работы")
     return
   }
@@ -541,10 +584,10 @@ async function handleTextMessage(message: TelegramMessage) {
   )
   
   // Ожидание имени
-  if (state.state === 'waiting_name') {
-    state.data.name = message.text
-    state.state = 'waiting_gender'
-    userStates.set(userId, state)
+  if (stateData.state === 'waiting_name') {
+    stateData.data.name = message.text
+    stateData.state = 'waiting_gender'
+    await setUserState(userId, stateData.state, stateData.data)
     await sendMessage(
       message.chat.id,
       `Приятно познакомиться, ${message.text}! 👋\n\n👤 Укажи свой пол:`,
@@ -553,41 +596,41 @@ async function handleTextMessage(message: TelegramMessage) {
   }
   
   // Ожидание возраста
-  else if (state.state === 'waiting_age') {
+  else if (stateData.state === 'waiting_age') {
     const age = parseInt(message.text)
     if (isNaN(age) || age < 10 || age > 120) {
       await sendMessage(message.chat.id, "❌ Пожалуйста, укажи корректный возраст (10-120 лет)")
       return
     }
-    state.data.age = age
-    state.state = 'waiting_weight'
-    userStates.set(userId, state)
+    stateData.data.age = age
+    stateData.state = 'waiting_weight'
+    await setUserState(userId, stateData.state, stateData.data)
     await sendMessage(message.chat.id, "⚖️ Укажи свой текущий вес (в кг):")
   }
   
   // Ожидание веса
-  else if (state.state === 'waiting_weight') {
+  else if (stateData.state === 'waiting_weight') {
     const weight = parseFloat(message.text.replace(',', '.'))
     if (isNaN(weight) || weight < 30 || weight > 300) {
       await sendMessage(message.chat.id, "❌ Пожалуйста, укажи корректный вес (30-300 кг)")
       return
     }
-    state.data.current_weight = weight
-    state.state = 'waiting_height'
-    userStates.set(userId, state)
+    stateData.data.current_weight = weight
+    stateData.state = 'waiting_height'
+    await setUserState(userId, stateData.state, stateData.data)
     await sendMessage(message.chat.id, "📏 Укажи свой рост (в см):")
   }
   
   // Ожидание роста
-  else if (state.state === 'waiting_height') {
+  else if (stateData.state === 'waiting_height') {
     const height = parseFloat(message.text.replace(',', '.'))
     if (isNaN(height) || height < 100 || height > 250) {
       await sendMessage(message.chat.id, "❌ Пожалуйста, укажи корректный рост (100-250 см)")
       return
     }
-    state.data.height = height
-    state.state = 'waiting_activity'
-    userStates.set(userId, state)
+    stateData.data.height = height
+    stateData.state = 'waiting_activity'
+    await setUserState(userId, stateData.state, stateData.data)
     await sendMessage(
       message.chat.id,
       "💪 Выбери уровень активности:",
@@ -596,22 +639,22 @@ async function handleTextMessage(message: TelegramMessage) {
   }
   
   // Ожидание пожеланий
-  else if (state.state === 'waiting_wishes') {
-    state.data.wishes = message.text
-    userStates.set(userId, state)
+  else if (stateData.state === 'waiting_wishes') {
+    stateData.data.wishes = message.text
+    await setUserState(userId, stateData.state, stateData.data)
     
     await sendMessage(message.chat.id, "⏳ Создаю твой персональный план КБЖУ...")
     
     // Генерируем план через OpenAI
     try {
-      const plan = await generateNutritionPlan(state.data)
+      const plan = await generateNutritionPlan(stateData.data)
       
       // Сохраняем профиль
       const { data: profile } = await supabase
         .from('user_profiles')
         .upsert({
           user_id: user.id,
-          ...state.data
+          ...stateData.data
         })
         .select()
         .single()
@@ -638,10 +681,10 @@ async function handleTextMessage(message: TelegramMessage) {
           is_active: true
         })
       
-      const cardText = formatNutritionCard(plan, state.data)
+      const cardText = formatNutritionCard(plan, stateData.data)
       await sendMessage(message.chat.id, cardText, nutritionCardKeyboard())
       
-      userStates.delete(userId)
+      await clearUserState(userId)
     } catch (error) {
       console.error('Error generating plan:', error)
       await sendMessage(message.chat.id, "❌ Ошибка создания плана. Попробуй еще раз /start")
@@ -649,7 +692,7 @@ async function handleTextMessage(message: TelegramMessage) {
   }
   
   // Ожидание корректировки
-  else if (state.state === 'waiting_adjustment') {
+  else if (stateData.state === 'waiting_adjustment') {
     await sendMessage(message.chat.id, "⏳ Корректирую план...")
     
     try {
@@ -691,7 +734,7 @@ async function handleTextMessage(message: TelegramMessage) {
       const cardText = formatNutritionCard(updatedPlan, profile)
       await sendMessage(message.chat.id, cardText, nutritionCardKeyboard())
       
-      userStates.delete(userId)
+      await clearUserState(userId)
     } catch (error) {
       console.error('Error adjusting plan:', error)
       await sendMessage(message.chat.id, "❌ Ошибка корректировки плана. Попробуй еще раз.")
