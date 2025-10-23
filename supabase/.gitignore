@@ -1,9 +1,0 @@
-# Supabase
-.supabase/
-
-# Local development
-.env.local
-.env.*.local
-
-# Deno
-deno.lock
