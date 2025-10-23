@@ -13,22 +13,36 @@ const SUPABASE_ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY')!
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY })
 
+// Простой кеш для планов (живёт в памяти Edge Function)
+const plansCache = new Map<number, { plan: any, timestamp: number }>()
+const CACHE_TTL = 5 * 60 * 1000 // 5 минут
+
 // FSM состояния
 type UserState = 'none' | 'profile_age' | 'profile_sex' | 'profile_height' | 'profile_weight' | 
-                 'profile_activity' | 'profile_goal' | 'profile_tz' | 'meal_input' | 'plan_discussion'
+                 'profile_activity' | 'profile_goal' | 'profile_tz' | 'meal_input' | 'plan_discussion' | 'custom_calories' |
+                 'manual_protein' | 'manual_fat' | 'manual_carbs'
 
 // System prompt для LLM
 const SYSTEM_PROMPT = `Ты — C.I.D., нутри-коуч. Твоя задача: понимать свободные фразы и возвращать **строгий JSON** c намерением и параметрами.
+
+ВАЖНО: Если запрос неоднозначный (например "хочу больше белка и меньше углей, калории оставь") — ты ДОЛЖЕН уточнить:
+- Сколько именно добавить белка? (например +20г или +15%)
+- Сколько убрать углеводов? (компенсировать всё белком или частично?)
+- Какая цель пользователя? (набор массы, похудение, поддержание)
 
 Правила:
 - Если пользователь просит «оставь калории», сохраняй целевую калорийность и перераспределяй макросы
 - Соблюдай безопасные минимумы: белок ≥1.4 г/кг, жир ≥0.6 г/кг
 - Дефицит/профицит в диапазоне −25…+15% TDEE
 - Если запрос экстремальный (например 9000 ккал), предложи разумный коридор
+- ВСЕГДА объясняй свой выбор в поле "reasoning"
 
 Формат ответа (ТОЛЬКО JSON, без markdown):
 {
-  "intent": "adjust_macros | set_calories | ask_explain | accept_plan | unknown",
+  "intent": "adjust_macros | set_calories | ask_clarification | accept_plan | unknown",
+  "needs_clarification": true | false,
+  "clarification_question": "текст вопроса для уточнения (если needs_clarification=true)",
+  "reasoning": "почему ты сделал такой выбор, учитывая цель пользователя и контекст",
   "constraints": {
     "keep_calories": true | false,
     "target_calories": null | number
@@ -41,13 +55,16 @@ const SYSTEM_PROMPT = `Ты — C.I.D., нутри-коуч. Твоя задач
 
 Примеры:
 1. "хочу больше белка и меньше углей, калории те же"
-{"intent":"adjust_macros","constraints":{"keep_calories":true,"target_calories":null},"protein":{"mode":"delta_g","value":20},"fat":{"mode":"none","value":0},"carbs":{"mode":"auto","value":0},"notes":"увеличить белок, сохранить калории, баланс снять с углеводов"}
+{"intent":"ask_clarification","needs_clarification":true,"clarification_question":"Понял! Сколько именно белка добавить? Например:\n• +20г белка, остальное компенсировать углями\n• +15% белка от текущего\n• довести до 2г/кг веса","reasoning":"Запрос неоднозначный, нужно уточнить конкретные значения","constraints":{"keep_calories":true,"target_calories":null},"protein":{"mode":"none","value":0},"fat":{"mode":"none","value":0},"carbs":{"mode":"none","value":0},"notes":"требуется уточнение"}
 
-2. "углей много — минус 15%"
-{"intent":"adjust_macros","constraints":{"keep_calories":false,"target_calories":null},"protein":{"mode":"none","value":0},"fat":{"mode":"none","value":0},"carbs":{"mode":"delta_pct","value":-15},"notes":"снизить долю углеводов"}
+2. "добавь 30г белка, калории оставь"
+{"intent":"adjust_macros","needs_clarification":false,"clarification_question":"","reasoning":"Чёткий запрос: +30г белка, калории сохранить. Компенсирую углеводами (−30г×4÷4 = −30г углей)","constraints":{"keep_calories":true,"target_calories":null},"protein":{"mode":"delta_g","value":30},"fat":{"mode":"none","value":0},"carbs":{"mode":"auto","value":0},"notes":"увеличить белок на 30г, сохранить калории"}
 
-3. "мне нужно 9000 калорий"
-{"intent":"set_calories","constraints":{"keep_calories":false,"target_calories":9000},"protein":{"mode":"none","value":0},"fat":{"mode":"none","value":0},"carbs":{"mode":"none","value":0},"notes":"запрос сверхвысокой калорийности — требуется подтверждение"}`
+3. "углей много — минус 15%"
+{"intent":"adjust_macros","needs_clarification":false,"clarification_question":"","reasoning":"Снижаю углеводы на 15%. Калории уменьшатся, белок и жиры оставляю без изменений","constraints":{"keep_calories":false,"target_calories":null},"protein":{"mode":"none","value":0},"fat":{"mode":"none","value":0},"carbs":{"mode":"delta_pct","value":-15},"notes":"снизить долю углеводов на 15%"}
+
+4. "мне нужно 9000 калорий"
+{"intent":"set_calories","needs_clarification":false,"clarification_question":"","reasoning":"9000 ккал сильно выше TDEE. Это экстремальный запрос, требуется подтверждение","constraints":{"keep_calories":false,"target_calories":9000},"protein":{"mode":"none","value":0},"fat":{"mode":"none","value":0},"carbs":{"mode":"none","value":0},"notes":"запрос сверхвысокой калорийности"}`
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -63,19 +80,20 @@ serve(async (req) => {
     }
     
     if (update.message) {
-      const chatId = update.message.chat.id
-      const userId = update.message.from.id
-      const text = update.message.text
-      const voice = update.message.voice
-      const photo = update.message.photo
+      const message = update.message
+      const chatId = message.chat.id
+      const userId = message.from.id
+      const text = message.text
+      const voice = message.voice
       
-      if (photo) {
-        await sendMessage(chatId, '📷 Фото не принимаю. Вводи цифры или голосом.')
+      // Обработка фото/видео - отказ
+      if (message.photo || message.video) {
+        await sendMessage(chatId, '📸 Фото не принимаю. Вводи цифры или голосом.', getMainMenuInline())
         return success()
       }
       
       if (text?.startsWith('/start')) {
-        await handleStart(chatId, userId, update.message.from.username)
+        await handleStart(chatId, userId, message.from.username)
         return success()
       }
       
@@ -101,15 +119,15 @@ Profile complete: ${!(!user?.age || !user?.sex || !user?.height_cm || !user?.wei
       }
       
       if (text?.startsWith('/clearkb')) {
-        await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            chat_id: chatId,
+          await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: chatId,
             text: '✅ Клавиатура удалена. Теперь отправь /start',
             reply_markup: { remove_keyboard: true }
+            })
           })
-        })
         return success()
       }
       
@@ -189,6 +207,33 @@ async function getUser(userId: number) {
   return data
 }
 
+async function getActivePlan(userId: number) {
+  // Проверяем кеш
+  const cached = plansCache.get(userId)
+  if (cached && (Date.now() - cached.timestamp) < CACHE_TTL) {
+    return cached.plan
+  }
+  
+  // Загружаем из БД
+  const { data } = await supabase
+    .from('plans')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('is_active', true)
+    .maybeSingle()
+  
+  // Сохраняем в кеш
+  if (data) {
+    plansCache.set(userId, { plan: data, timestamp: Date.now() })
+  }
+  
+  return data
+}
+
+function invalidatePlanCache(userId: number) {
+  plansCache.delete(userId)
+}
+
 async function ensureUser(userId: number, username?: string) {
   const user = await getUser(userId)
   if (!user) {
@@ -208,15 +253,11 @@ function getMainMenuInline() {
     inline_keyboard: [
       [
         { text: '👤 Профиль', callback_data: 'menu_profile' },
-        { text: '📊 Рассчитать КБЖУ', callback_data: 'menu_calculate' }
+        { text: '📊 План КБЖУ', callback_data: 'menu_calculate' }
       ],
       [
-        { text: '💬 Настроить в диалоге', callback_data: 'menu_discussion' },
+        { text: '💬 Настроить', callback_data: 'menu_discussion' },
         { text: '📅 Сегодня', callback_data: 'menu_today' }
-      ],
-      [
-        { text: '⏰ Напоминания', callback_data: 'menu_reminders' },
-        { text: '❓ Помощь', callback_data: 'menu_help' }
       ]
     ]
   }
@@ -242,7 +283,7 @@ async function handleStart(chatId: number, userId: number, username?: string) {
 Чтобы начать — заполните короткую форму.`
     
     await sendMessage(chatId, message, {
-      inline_keyboard: [[{ text: '⚙️ Настроить профиль', callback_data: 'profile_edit' }]]
+      inline_keyboard: [[{ text: '📝 Заполнить форму', callback_data: 'profile_edit' }]]
     })
     return // ВАЖНО: не показываем главное меню
   }
@@ -260,10 +301,8 @@ async function handleStart(chatId: number, userId: number, username?: string) {
 async function handleWipe(chatId: number, userId: number) {
   await sendMessage(chatId, '⚠️ Удалить все данные?', {
     inline_keyboard: [
-      [
-        { text: '✅ Да, удалить', callback_data: 'wipe_confirm' },
-        { text: '❌ Отмена', callback_data: 'menu_main' }
-      ]
+      [{ text: '✅ Да, удалить', callback_data: 'wipe_confirm' }],
+      [{ text: '🔙 Отмена', callback_data: 'menu_main' }]
     ]
   })
 }
@@ -296,13 +335,7 @@ async function handleCallbackQuery(query: any) {
       await handleTodayMenu(chatId, userId)
       break
       
-    case 'menu_reminders':
-      await handleRemindersMenu(chatId, userId)
-      break
-      
-    case 'menu_help':
-      await handleHelp(chatId, userId)
-      break
+    // Напоминания и помощь убраны из главного меню (доступны через команды)
       
     case 'profile_edit':
       await startProfileWizard(chatId, userId)
@@ -329,7 +362,13 @@ async function handleCallbackQuery(query: any) {
         await handleProfileCallback(chatId, userId, data)
       } else if (data.startsWith('confirm_calories_')) {
         await handleCaloriesConfirm(chatId, userId, data)
-          } else {
+      } else if (data.startsWith('force_calories_')) {
+        await handleForceCalories(chatId, userId, data)
+      } else if (data.startsWith('apply_plan_')) {
+        await handleApplyPlan(chatId, userId, data)
+      } else if (data === 'manual_macros_input') {
+        await startManualMacrosInput(chatId, userId)
+      } else {
         await sendMessage(chatId, 'Не понял. Выбери действие ниже ⬇️', getMainMenuInline())
       }
   }
@@ -341,6 +380,14 @@ async function handleText(chatId: number, userId: number, text: string) {
   // Обработка FSM состояний
   if (state === 'plan_discussion') {
     await handlePlanDiscussion(chatId, userId, text)
+  } else if (state === 'custom_calories') {
+    await handleCustomCalories(chatId, userId, text)
+  } else if (state === 'manual_protein') {
+    await handleManualProtein(chatId, userId, text)
+  } else if (state === 'manual_fat') {
+    await handleManualFat(chatId, userId, text)
+  } else if (state === 'manual_carbs') {
+    await handleManualCarbs(chatId, userId, text)
   } else if (state === 'profile_age') {
     await handleProfileAge(chatId, userId, text)
   } else if (state === 'profile_height') {
@@ -427,7 +474,7 @@ async function startPlanDiscussion(chatId: number, userId: number) {
   
   if (!plan) {
     await sendMessage(chatId, '❌ Сначала рассчитайте план', {
-      inline_keyboard: [[{ text: '📊 Рассчитать КБЖУ', callback_data: 'menu_calculate' }]]
+      inline_keyboard: [[{ text: '📊 План КБЖУ', callback_data: 'menu_calculate' }]]
     })
     return
   }
@@ -441,22 +488,27 @@ async function startPlanDiscussion(chatId: number, userId: number) {
 📊 Калории: ${plan.kcal} ккал
 
 Скажите в свободной форме, что хотите изменить:
-• "хочу больше белка и меньше углей, калории оставь"
+• "добавь 30г белка, калории оставь"
 • "углей многовато, срежь на 15%"
 • "поставь белок 160 г"
 
+<b>Для точного ввода:</b>
+• "вручную: 180г белка, 90г жиров, 250г углей"
+
 Или используйте голос 🎤`
   
-  await sendMessage(chatId, message, {
-    inline_keyboard: [
-      [{ text: '✅ Принять текущий план', callback_data: 'accept_plan' }],
-      [{ text: '🔙 Главное меню', callback_data: 'menu_main' }]
-    ]
-  })
+  await sendMessage(chatId, message)
 }
 
 async function handlePlanDiscussion(chatId: number, userId: number, text: string) {
   try {
+    // Проверяем, не пытается ли пользователь ввести макросы вручную
+    if (text.match(/вручную|калории|ккал/i)) {
+      await setUserState(userId, 'custom_calories')
+      await handleCustomCalories(chatId, userId, text)
+      return
+    }
+    
     // Получаем текущий план и пользователя
     const user = await getUser(userId)
     const { data: currentPlan } = await supabase
@@ -471,14 +523,37 @@ async function handlePlanDiscussion(chatId: number, userId: number, text: string
       return
     }
     
-    // Отправляем в LLM
+    // Получаем историю корректировок
+    const { data: planHistory } = await supabase
+      .from('plans')
+      .select('rules_json, created_at')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(3)
+    
+    const historyContext = planHistory && planHistory.length > 1 
+      ? `\n\nИстория корректировок:\n${planHistory.slice(1).map((p, i) => `${i+1}. ${p.rules_json?.notes || 'нет данных'}`).join('\n')}`
+      : ''
+    
+    const goalText = user.goal === 'fat_loss' ? 'похудение (дефицит −15%)' : 
+                     user.goal === 'gain' ? 'набор массы (профицит +10%)' : 
+                     'поддержание веса'
+    
+    // Отправляем в LLM с полным контекстом
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
         { 
           role: 'user', 
-          content: `Текущий план: ${currentPlan.kcal} ккал, Б${currentPlan.p}г Ж${currentPlan.f}г У${currentPlan.c}г. Вес пользователя: ${user.weight_kg}кг. TDEE: ${calculateTDEE(user)} ккал. Запрос: "${text}"` 
+          content: `КОНТЕКСТ ПОЛЬЗОВАТЕЛЯ:
+Цель: ${goalText}
+Вес: ${user.weight_kg}кг
+TDEE: ${calculateTDEE(user)} ккал
+Текущий план: ${currentPlan.kcal} ккал | Б${currentPlan.p}г Ж${currentPlan.f}г У${currentPlan.c}г
+Источник плана: ${currentPlan.source === 'manual' ? 'ручная корректировка' : 'автоматический расчёт'}${historyContext}
+
+ЗАПРОС: "${text}"` 
         }
       ],
       temperature: 0.3,
@@ -492,18 +567,22 @@ async function handlePlanDiscussion(chatId: number, userId: number, text: string
     
     const intent = JSON.parse(intentJson)
     
+    // Если LLM требует уточнения
+    if (intent.needs_clarification && intent.clarification_question) {
+      await sendMessage(chatId, `💬 ${intent.clarification_question}`)
+      return
+    }
+    
     // Применяем изменения
     await applyPlanChanges(chatId, userId, intent, currentPlan, user)
     
   } catch (error) {
     console.error('Plan discussion error:', error)
-    await sendMessage(chatId, 'Не до конца понял. Попробуйте переформулировать или выберите:', {
-      inline_keyboard: [
-        [{ text: 'Больше белка', callback_data: 'menu_discussion' }],
-        [{ text: 'Меньше углеводов', callback_data: 'menu_discussion' }],
-        [{ text: 'Главное меню', callback_data: 'menu_main' }]
-      ]
-    })
+    await sendMessage(chatId, `❌ Не до конца понял. 
+
+Попробуйте ещё раз или используйте формат:
+• вручную: 180g 90g 250g (белок, жир, углеводы)
+• калории 3000`)
   }
 }
 
@@ -518,15 +597,21 @@ async function applyPlanChanges(chatId: number, userId: number, intent: any, cur
     
     if (targetCal > maxCal || targetCal < minCal) {
       const suggestedCal = targetCal > maxCal ? maxCal : minCal
+      
+      // Добавляем reasoning от LLM
+      let reasoningText = ''
+      if (intent.reasoning) {
+        reasoningText = `\n\n💡 <b>Почему не ${targetCal}:</b>\n${intent.reasoning}`
+      }
+      
       await sendMessage(chatId, `⚠️ Запрос ${targetCal} ккал выходит за безопасный коридор (ваш TDEE ≈${tdee}).
 
-Для ${targetCal > maxCal ? 'массонабора' : 'похудения'} рекомендую ${suggestedCal} ккал.
+Для ${targetCal > maxCal ? 'массонабора' : 'похудения'} рекомендую ${suggestedCal} ккал.${reasoningText}
 
 Подтвердить ${suggestedCal} ккал?`, {
         inline_keyboard: [
           [{ text: `✅ Принять ${suggestedCal}`, callback_data: `confirm_calories_${suggestedCal}` }],
-          [{ text: '✏️ Указать своё значение', callback_data: 'menu_discussion' }],
-          [{ text: '🔙 Отмена', callback_data: 'menu_main' }]
+          [{ text: `⚠️ Применить ${targetCal}`, callback_data: `force_calories_${targetCal}` }]
         ]
       })
       return
@@ -608,6 +693,9 @@ async function applyPlanChanges(chatId: number, userId: number, intent: any, cur
     rules_json: intent
   })
   
+  // Инвалидируем кеш
+  invalidatePlanCache(userId)
+  
   // Формируем ответ
   const deltaP = newP - currentPlan.p
   const deltaF = newF - currentPlan.f
@@ -625,24 +713,25 @@ async function applyPlanChanges(chatId: number, userId: number, intent: any, cur
   if (deltaC !== 0) changesText.push(`Углеводы ${deltaC > 0 ? '+' : ''}${deltaC}г`)
   if (deltaKcal !== 0) changesText.push(`Калории ${deltaKcal > 0 ? '+' : ''}${deltaKcal}`)
   
+  // Добавляем reasoning от LLM если есть
+  let reasoningText = ''
+  if (intent.reasoning) {
+    reasoningText = `\n\n💡 <b>Почему так:</b>\n${intent.reasoning}`
+  }
+  
   let message = `✅ ${explanation}
 
 ${changesText.join(', ')}
 
 <b>Новый план:</b>
-🥩 Б ${newP}г · 🥑 Ж ${newF}г · 🍞 У ${newC}г · 📊 ${newKcal} ккал`
+🥩 Б ${newP}г · 🥑 Ж ${newF}г · 🍞 У ${newC}г · 📊 ${newKcal} ккал${reasoningText}`
   
   if (warnings.length > 0) {
     message += `\n\n⚠️ ${warnings.join('. ')}`
   }
   
   await setUserState(userId, 'none')
-  await sendMessage(chatId, message, {
-    inline_keyboard: [
-      [{ text: '✅ Принять', callback_data: 'menu_main' }],
-      [{ text: '💬 Ещё подправить', callback_data: 'menu_discussion' }]
-    ]
-  })
+  await sendMessage(chatId, message, getMainMenuInline())
 }
 
 async function handleCaloriesConfirm(chatId: number, userId: number, data: string) {
@@ -667,14 +756,389 @@ async function handleCaloriesConfirm(chatId: number, userId: number, data: strin
     is_active: true
   })
   
+  invalidatePlanCache(userId)
+  
   await sendMessage(chatId, `✅ План обновлён
 
 🥩 Б ${proteinG}г · 🥑 Ж ${fatG}г · 🍞 У ${carbsG}г · 📊 ${calories} ккал`, getMainMenuInline())
 }
 
+async function handleForceCalories(chatId: number, userId: number, data: string) {
+  const calories = parseInt(data.replace('force_calories_', ''))
+  
+  const user = await getUser(userId)
+  if (!user) return
+  
+  const tdee = calculateTDEE(user)
+  const goalText = user.goal === 'fat_loss' ? 'похудение' : 
+                   user.goal === 'gain' ? 'набор массы' : 
+                   'поддержание веса'
+  
+  // Запрашиваем у LLM оптимальное распределение БЖУ для запрошенных калорий
+  try {
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        { 
+          role: 'system', 
+          content: `Ты — нутрициолог. Рассчитай оптимальное распределение БЖУ для ТОЧНО заданной калорийности.
+
+ВАЖНО: Сумма калорий из БЖУ ДОЛЖНА равняться целевой калорийности!
+Формула: (белок_г × 4) + (жиры_г × 9) + (углеводы_г × 4) = целевые_калории
+
+Правила:
+- Белок: 1.6-2.2 г/кг (для набора массы ближе к 2.2, для похудения 1.8-2.0)
+- Жиры: 0.8-1.2 г/кг (минимум 0.6 г/кг)
+- Углеводы: рассчитываются так, чтобы сумма калорий была ТОЧНО равна целевой
+- Верни ТОЛЬКО JSON без markdown
+
+Алгоритм:
+1. Определи белок (г/кг × вес)
+2. Определи жиры (г/кг × вес)
+3. Рассчитай углеводы: (целевые_ккал - белок×4 - жиры×9) / 4
+4. Проверь: белок×4 + жиры×9 + углеводы×4 = целевые_ккал
+
+Формат ответа:
+{
+  "protein_g": число,
+  "fat_g": число,
+  "carbs_g": число,
+  "reasoning": "почему именно такое распределение для этой цели и калорийности"
+}` 
+        },
+        { 
+          role: 'user', 
+          content: `Целевые калории: ${calories} ккал (ТОЧНО!)
+Вес: ${user.weight_kg} кг
+Цель: ${goalText}
+TDEE: ${tdee} ккал
+
+Рассчитай БЖУ так, чтобы сумма калорий была РОВНО ${calories} ккал.` 
+        }
+      ],
+      temperature: 0.3,
+      response_format: { type: 'json_object' }
+    })
+    
+    const result = JSON.parse(completion.choices[0].message.content || '{}')
+    let proteinG = Math.round(result.protein_g || user.weight_kg * 1.8)
+    let fatG = Math.round(result.fat_g || user.weight_kg * 0.9)
+    let carbsG = Math.round(result.carbs_g || 0)
+    
+    // ПРОВЕРКА: пересчитываем калории из БЖУ
+    const calculatedCalories = (proteinG * 4) + (fatG * 9) + (carbsG * 4)
+    const diff = Math.abs(calculatedCalories - calories)
+    
+    // Если разница больше 50 ккал — пересчитываем углеводы
+    if (diff > 50) {
+      carbsG = Math.round((calories - (proteinG * 4) - (fatG * 9)) / 4)
+      console.log(`LLM ошиблась: ${calculatedCalories} вместо ${calories}. Пересчитали углеводы: ${carbsG}г`)
+    }
+    
+    await sendMessage(chatId, `💡 <b>Рекомендую для ${calories} ккал:</b>
+
+🥩 Белок: ${proteinG} г
+🥑 Жиры: ${fatG} г  
+🍞 Углеводы: ${carbsG} г
+📊 Калории: ${calories} ккал
+
+<b>Почему так:</b>
+${result.reasoning || 'Оптимальное распределение для вашей цели'}
+
+⚠️ <b>Внимание:</b> ${calories} ккал ${calories > tdee * 1.15 ? 'значительно превышает' : 'значительно ниже'} ваш TDEE (≈${tdee} ккал).`, {
+      inline_keyboard: [
+        [{ text: '✅ Принять план', callback_data: `apply_plan_${proteinG}_${fatG}_${carbsG}_${calories}` }],
+        [{ text: '✏️ Внести вручную', callback_data: 'manual_macros_input' }]
+      ]
+    })
+    
+  } catch (error) {
+    console.error('LLM error:', error)
+    // Фоллбек: стандартный расчёт
+    const proteinG = Math.round(user.weight_kg * 1.8)
+    const fatG = Math.round(user.weight_kg * 0.9)
+    const carbsG = Math.round((calories - (proteinG * 4) - (fatG * 9)) / 4)
+    
+    await sendMessage(chatId, `💡 <b>Рекомендую для ${calories} ккал:</b>
+
+🥩 Белок: ${proteinG} г
+🥑 Жиры: ${fatG} г  
+🍞 Углеводы: ${carbsG} г
+
+⚠️ ${calories} ккал ${calories > tdee * 1.15 ? 'превышает' : 'ниже'} ваш TDEE (≈${tdee} ккал).`, {
+      inline_keyboard: [
+        [{ text: '✅ Принять план', callback_data: `apply_plan_${proteinG}_${fatG}_${carbsG}_${calories}` }],
+        [{ text: '✏️ Внести вручную', callback_data: 'manual_macros_input' }]
+      ]
+    })
+  }
+}
+
+async function handleApplyPlan(chatId: number, userId: number, data: string) {
+  const parts = data.replace('apply_plan_', '').split('_')
+  const proteinG = parseInt(parts[0])
+  const fatG = parseInt(parts[1])
+  const carbsG = parseInt(parts[2])
+  const calories = parseInt(parts[3])
+  
+  await supabase.from('plans').update({ is_active: false }).eq('user_id', userId)
+  await supabase.from('plans').insert({
+    user_id: userId,
+    kcal: calories,
+    p: proteinG,
+    f: fatG,
+    c: carbsG,
+    source: 'manual',
+    is_active: true,
+    rules_json: { notes: `LLM-оптимизированный план для ${calories} ккал` }
+  })
+  
+  invalidatePlanCache(userId)
+  
+  await sendMessage(chatId, `✅ <b>План применён!</b>
+
+🥩 Белок: ${proteinG} г
+🥑 Жиры: ${fatG} г
+🍞 Углеводы: ${carbsG} г
+📊 Калории: ${calories} ккал`, getMainMenuInline())
+}
+
+async function startManualMacrosInput(chatId: number, userId: number) {
+  await setUserState(userId, 'manual_protein')
+  // Сохраняем временные данные в state
+  await supabase.from('state').upsert({ 
+    user_id: userId, 
+    last_menu: 'manual_protein',
+    last_msgs_json: {} 
+  }, { onConflict: 'user_id' })
+  
+  await sendMessage(chatId, '✏️ <b>Ручной ввод КБЖУ</b>\n\nШаг 1/3: Сколько грамм <b>белка</b>?\n\nПример: 180')
+}
+
+async function handleManualProtein(chatId: number, userId: number, text: string) {
+  const protein = parseInt(text.match(/(\d+)/)?.[1] || '0')
+  
+  if (!protein || protein < 50 || protein > 500) {
+    await sendMessage(chatId, '❌ Введите корректное значение белка (50-500г)')
+    return
+  }
+  
+  // Сохраняем белок
+  await supabase.from('state').update({ 
+    last_msgs_json: { protein } 
+  }).eq('user_id', userId)
+  
+  await setUserState(userId, 'manual_fat')
+  await sendMessage(chatId, `✅ Белок: ${protein}г\n\nШаг 2/3: Сколько грамм <b>жиров</b>?\n\nПример: 90`)
+}
+
+async function handleManualFat(chatId: number, userId: number, text: string) {
+  const fat = parseInt(text.match(/(\d+)/)?.[1] || '0')
+  
+  if (!fat || fat < 30 || fat > 300) {
+    await sendMessage(chatId, '❌ Введите корректное значение жиров (30-300г)')
+    return
+  }
+  
+  // Получаем белок и сохраняем жир
+  const { data: stateData } = await supabase
+    .from('state')
+    .select('last_msgs_json')
+    .eq('user_id', userId)
+    .single()
+  
+  const protein = stateData?.last_msgs_json?.protein || 0
+  
+  await supabase.from('state').update({ 
+    last_msgs_json: { protein, fat } 
+  }).eq('user_id', userId)
+  
+  await setUserState(userId, 'manual_carbs')
+  await sendMessage(chatId, `✅ Белок: ${protein}г, Жиры: ${fat}г\n\nШаг 3/3: Сколько грамм <b>углеводов</b>?\n\nПример: 250`)
+}
+
+async function handleManualCarbs(chatId: number, userId: number, text: string) {
+  const carbs = parseInt(text.match(/(\d+)/)?.[1] || '0')
+  
+  if (!carbs || carbs < 0 || carbs > 2000) {
+    await sendMessage(chatId, '❌ Введите корректное значение углеводов (0-2000г)')
+    return
+  }
+  
+  // Получаем белок и жир
+  const { data: stateData } = await supabase
+    .from('state')
+    .select('last_msgs_json')
+    .eq('user_id', userId)
+    .single()
+  
+  const protein = stateData?.last_msgs_json?.protein || 0
+  const fat = stateData?.last_msgs_json?.fat || 0
+  const calories = (protein * 4) + (fat * 9) + (carbs * 4)
+  
+  // Сохраняем план
+  await supabase.from('plans').update({ is_active: false }).eq('user_id', userId)
+  await supabase.from('plans').insert({
+    user_id: userId,
+    kcal: calories,
+    p: protein,
+    f: fat,
+    c: carbs,
+    source: 'manual',
+    is_active: true,
+    rules_json: { notes: 'Ручной ввод КБЖУ пользователем' }
+  })
+  
+  invalidatePlanCache(userId)
+  
+  await setUserState(userId, 'none')
+  await sendMessage(chatId, `✅ <b>План создан!</b>
+
+🥩 Белок: ${protein} г
+🥑 Жиры: ${fat} г
+🍞 Углеводы: ${carbs} г
+📊 Калории: ${calories} ккал`, getMainMenuInline())
+}
+
 async function acceptPlan(chatId: number, userId: number) {
   await setUserState(userId, 'none')
   await sendMessage(chatId, '✅ План принят!', getMainMenuInline())
+}
+
+// === КАСТОМНЫЕ КАЛОРИИ/МАКРОСЫ ===
+
+async function handleCustomCalories(chatId: number, userId: number, text: string) {
+  // Получаем текущий план и пользователя
+  const user = await getUser(userId)
+  const { data: currentPlan } = await supabase
+    .from('plans')
+      .select('*')
+      .eq('user_id', userId)
+    .eq('is_active', true)
+      .single()
+    
+  if (!currentPlan || !user) {
+    await sendMessage(chatId, '❌ Ошибка получения данных')
+    return
+  }
+  
+  // Парсим различные форматы ввода
+  // Форматы: "вручную: 180g 90g 250g", "180 90 250", "калории 3000", "9000 ккал"
+  
+  let newP: number | null = null
+  let newF: number | null = null
+  let newC: number | null = null
+  let newKcal: number | null = null
+  
+  // Проверка формата "вручную: XXXg XXXg XXXg"
+  const manualMatch = text.match(/вручную[:\s]+(\d+)\D+(\d+)\D+(\d+)/i)
+  if (manualMatch) {
+    newP = parseInt(manualMatch[1])
+    newF = parseInt(manualMatch[2])
+    newC = parseInt(manualMatch[3])
+  }
+  
+  // Проверка формата "калории 3000" или "3000 ккал"
+  const caloriesMatch = text.match(/(?:калории|ккал)?\s*(\d+)\s*(?:ккал)?/i)
+  if (caloriesMatch && !newP) {
+    newKcal = parseInt(caloriesMatch[1])
+  }
+  
+  // Валидация
+  if (!newP && !newF && !newC && !newKcal) {
+    await sendMessage(chatId, `❌ Не понял формат. Примеры:
+• вручную: 180g 90g 250g
+• калории 3000
+• 2500 ккал`)
+    return
+  }
+  
+  // Если вводили макросы вручную
+  if (newP && newF && newC) {
+    // Проверяем минимумы
+    const minProtein = Math.round(user.weight_kg * 1.4)
+    const minFat = Math.round(user.weight_kg * 0.6)
+    
+    if (newP < minProtein) {
+      await sendMessage(chatId, `⚠️ Белок ${newP}г ниже минимума (${minProtein}г). Поднял до минимума.`)
+      newP = minProtein
+    }
+    if (newF < minFat) {
+      await sendMessage(chatId, `⚠️ Жир ${newF}г ниже минимума (${minFat}г). Поднял до минимума.`)
+      newF = minFat
+    }
+    
+    newKcal = (newP * 4) + (newF * 9) + (newC * 4)
+  } 
+  // Если вводили только калории
+  else if (newKcal) {
+    if (newKcal < 500 || newKcal > 15000) {
+      await sendMessage(chatId, '❌ Калории должны быть от 500 до 15000')
+      return
+    }
+    
+    // Проверяем на экстремальные значения
+    const tdee = calculateTDEE(user)
+    const minCal = Math.round(tdee * 0.75)
+    const maxCal = Math.round(tdee * 1.15)
+    
+    if (newKcal > maxCal || newKcal < minCal) {
+      const suggestedCal = newKcal > maxCal ? maxCal : minCal
+      await setUserState(userId, 'none')
+      await sendMessage(chatId, `⚠️ ${newKcal} ккал выходит за безопасный коридор (ваш TDEE ≈${tdee}).
+
+Для ${newKcal > maxCal ? 'массонабора' : 'похудения'} рекомендую ${suggestedCal} ккал.
+
+💡 <b>Почему:</b>
+Экстремальные калории (${newKcal > maxCal ? 'выше +15%' : 'ниже −25%'} от TDEE) могут быть небезопасны. Рекомендую придерживаться коридора ${minCal}–${maxCal} ккал.
+
+Если вы уверены в своём выборе, используйте формат:
+• "вручную: 180г белка, 90г жиров, 250г углей"`, {
+        inline_keyboard: [
+          [{ text: `✅ Принять ${suggestedCal}`, callback_data: `confirm_calories_${suggestedCal}` }]
+        ]
+      })
+      return
+    }
+    
+    newP = Math.round(user.weight_kg * 1.6)
+    newF = Math.round(user.weight_kg * 0.8)
+    newC = Math.round((newKcal - (newP * 4) - (newF * 9)) / 4)
+  }
+  
+  if (!newKcal || !newP || !newF || !newC) {
+    await sendMessage(chatId, '❌ Ошибка расчёта. Попробуйте ещё раз.')
+    return
+  }
+  
+  // Сохраняем новый план
+  await supabase.from('plans').update({ is_active: false }).eq('user_id', userId)
+  await supabase.from('plans').insert({
+    user_id: userId,
+    kcal: newKcal,
+    p: newP,
+    f: newF,
+    c: newC,
+    source: 'manual',
+    is_active: true
+  })
+  
+  invalidatePlanCache(userId)
+  
+  await setUserState(userId, 'none')
+  
+  const tdee = calculateTDEE(user)
+  let warning = ''
+  if (newKcal > tdee * 1.15 || newKcal < tdee * 0.75) {
+    warning = `\n\n⚠️ <b>Внимание:</b> ${newKcal} ккал выходит за безопасный коридор (ваш TDEE ≈${tdee} ккал).`
+  }
+  
+  const message = `✅ <b>План обновлён!</b>
+
+🥩 Белок: ${newP} г · 🥑 Жиры: ${newF} г · 🍞 Углеводы: ${newC} г
+📊 Калории: ${newKcal} ккал${warning}`
+  
+  await sendMessage(chatId, message, getMainMenuInline())
 }
 
 // === ПРОФИЛЬ ===
@@ -697,8 +1161,8 @@ async function handleProfileMenu(chatId: number, userId: number) {
   
   await sendMessage(chatId, profileText, {
     inline_keyboard: [
-      [{ text: '✏️ Изменить профиль', callback_data: 'profile_edit' }],
-      [{ text: '🔙 Главное меню', callback_data: 'menu_main' }]
+      [{ text: '✏️ Изменить', callback_data: 'profile_edit' }],
+      [{ text: '🔙 Назад', callback_data: 'menu_main' }]
     ]
   })
 }
@@ -788,11 +1252,9 @@ async function handleProfileTz(chatId: number, userId: number, text: string) {
   await supabase.from('users').update({ tz: text }).eq('user_id', userId)
   await setUserState(userId, 'none')
   
-  await sendMessage(chatId, '✅ Профиль сохранён! Теперь могу рассчитать ваш персональный план.', {
-    inline_keyboard: [
-      [{ text: '📊 Рассчитать КБЖУ', callback_data: 'menu_calculate' }]
-    ]
-  })
+  // Автоматически переходим к расчету плана
+  await sendMessage(chatId, '✅ Профиль сохранён! Рассчитываю ваш персональный план...')
+  await handleCalculate(chatId, userId)
 }
 
 // === РАСЧЁТ КБЖУ ===
@@ -821,7 +1283,7 @@ async function handleCalculate(chatId: number, userId: number) {
   
   if (!user?.age || !user?.sex || !user?.height_cm || !user?.weight_kg || !user?.activity || !user?.goal) {
     await sendMessage(chatId, '❌ Сначала заполните профиль', {
-      inline_keyboard: [[{ text: '✏️ Заполнить профиль', callback_data: 'profile_edit' }]]
+      inline_keyboard: [[{ text: '📝 Заполнить форму', callback_data: 'profile_edit' }]]
     })
     return
   }
@@ -853,6 +1315,8 @@ async function handleCalculate(chatId: number, userId: number) {
     is_active: true
   })
   
+  invalidatePlanCache(userId)
+  
   const message = `✅ <b>Готово! Я рассчитал план по формуле Mifflin–St Jeor и активности (PAL).</b>
 
 TDEE: ${tdee} ккал → цель ${goalAdjustment} = ${targetKcal} ккал
@@ -871,7 +1335,7 @@ TDEE: ${tdee} ккал → цель ${goalAdjustment} = ${targetKcal} ккал
   await sendMessage(chatId, message, {
     inline_keyboard: [
       [{ text: '✅ Принять', callback_data: 'accept_plan' }],
-      [{ text: '💬 Настроить в диалоге', callback_data: 'menu_discussion' }]
+      [{ text: '💬 Настроить', callback_data: 'menu_discussion' }]
     ]
   })
 }
@@ -883,14 +1347,14 @@ async function handleTodayMenu(chatId: number, userId: number) {
     inline_keyboard: [
       [{ text: '➕ Добавить приём', callback_data: 'today_add_meal' }],
       [{ text: '📈 Итог дня', callback_data: 'today_summary' }],
-      [{ text: '🔙 Главное меню', callback_data: 'menu_main' }]
+      [{ text: '🔙 Назад', callback_data: 'menu_main' }]
     ]
   })
 }
 
 async function startMealInput(chatId: number, userId: number) {
   await setUserState(userId, 'meal_input')
-  await sendMessage(chatId, '🍽️ Введи ккал/Б/Ж/У\n\nПример: 620 ккал, Б45 Ж15 У70')
+  await sendMessage(chatId, '🍽️ Введите калории и макросы\n\nПример: 620 ккал, Б45 Ж15 У70\nИли используйте голос 🎤')
 }
 
 async function handleMealInput(chatId: number, userId: number, text: string) {
@@ -1000,7 +1464,7 @@ async function showDaySummary(chatId: number, userId: number) {
 
 async function handleRemindersMenu(chatId: number, userId: number) {
   await sendMessage(chatId, '⏰ <b>Напоминания</b>\n\nНастройка напоминаний в разработке', {
-    inline_keyboard: [[{ text: '🔙 Главное меню', callback_data: 'menu_main' }]]
+    inline_keyboard: [[{ text: '🔙 Назад', callback_data: 'menu_main' }]]
   })
 }
 
@@ -1051,7 +1515,7 @@ async function wipeUserData(chatId: number, userId: number) {
   }).eq('user_id', userId)
   
   await sendMessage(chatId, '✅ Данные удалены. Начнём заново?', {
-    inline_keyboard: [[{ text: '⚙️ Настроить профиль', callback_data: 'profile_edit' }]]
+    inline_keyboard: [[{ text: '📝 Заполнить форму', callback_data: 'profile_edit' }]]
   })
 }
 
