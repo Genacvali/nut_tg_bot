@@ -82,6 +82,7 @@ DROP FUNCTION IF EXISTS recalculate_daily_totals() CASCADE;
 -- Добавляем новые поля
 ALTER TABLE meals 
 ADD COLUMN IF NOT EXISTS note_text TEXT,
+ADD COLUMN IF NOT EXISTS kcal INTEGER,
 ADD COLUMN IF NOT EXISTS meal_type TEXT CHECK (meal_type IN ('breakfast','lunch','dinner','snack')),
 ADD COLUMN IF NOT EXISTS ts TIMESTAMP WITH TIME ZONE DEFAULT NOW();
 
@@ -197,7 +198,7 @@ CREATE INDEX idx_state_user_id ON state(user_id);
 CREATE TABLE events_log (
     id BIGSERIAL PRIMARY KEY,
     user_id BIGINT REFERENCES users(user_id) ON DELETE CASCADE,
-    event TEXT NOT NULL CHECK (event IN ('onboarding','meal_add','plan_update','reminder_fire','voice_intent','error')),
+    event TEXT NOT NULL,
     meta_json JSONB DEFAULT '{}'::jsonb,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
