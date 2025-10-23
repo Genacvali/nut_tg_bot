@@ -84,6 +84,35 @@ serve(async (req) => {
         return success()
       }
       
+      if (text?.startsWith('/debug')) {
+        const user = await getUser(userId)
+        const debugInfo = `🔍 Debug Info:
+User ID: ${userId}
+Age: ${user?.age || 'null'}
+Sex: ${user?.sex || 'null'}
+Height: ${user?.height_cm || 'null'}
+Weight: ${user?.weight_kg || 'null'}
+Activity: ${user?.activity || 'null'}
+Goal: ${user?.goal || 'null'}
+
+Profile complete: ${!(!user?.age || !user?.sex || !user?.height_cm || !user?.weight_kg || !user?.activity || !user?.goal)}`
+        await sendMessage(chatId, debugInfo)
+        return success()
+      }
+      
+      if (text?.startsWith('/clearkb')) {
+        await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: '✅ Клавиатура удалена. Теперь отправь /start',
+            reply_markup: { remove_keyboard: true }
+          })
+        })
+        return success()
+      }
+      
       if (voice) {
         await handleVoice(chatId, userId, voice)
         return success()
@@ -115,12 +144,8 @@ function success() {
 async function sendMessage(chatId: number, text: string, replyMarkup?: any) {
   const body: any = { chat_id: chatId, text, parse_mode: 'HTML' }
   
-  // Если передана inline клавиатура, удаляем reply keyboard
   if (replyMarkup) {
     body.reply_markup = replyMarkup
-  } else {
-    // Удаляем reply keyboard по умолчанию
-    body.reply_markup = { remove_keyboard: true }
   }
   
   await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
@@ -142,14 +167,14 @@ async function getUserState(userId: number): Promise<UserState> {
   const { data } = await supabase
     .from('state')
     .select('last_menu')
-    .eq('user_id', userId)
+            .eq('user_id', userId)
     .maybeSingle()
   
   return (data?.last_menu as UserState) || 'none'
 }
 
 async function setUserState(userId: number, state: UserState) {
-  await supabase
+          await supabase
     .from('state')
     .upsert({ user_id: userId, last_menu: state }, { onConflict: 'user_id' })
 }
@@ -157,7 +182,7 @@ async function setUserState(userId: number, state: UserState) {
 async function getUser(userId: number) {
   const { data } = await supabase
     .from('users')
-    .select('*')
+            .select('*')
     .eq('user_id', userId)
     .maybeSingle()
   
@@ -178,7 +203,7 @@ async function ensureUser(userId: number, username?: string) {
   }
 }
 
-function getMainMenuKeyboard() {
+function getMainMenuInline() {
   return {
     inline_keyboard: [
       [
@@ -205,8 +230,10 @@ async function handleStart(chatId: number, userId: number, username?: string) {
   const user = await getUser(userId)
   
   // Проверяем, заполнен ли профиль
-  if (!user?.age || !user?.sex || !user?.height_cm || !user?.weight_kg || !user?.activity || !user?.goal) {
-    // Первый запуск - только кнопка заполнить форму
+  const profileIncomplete = !user?.age || !user?.sex || !user?.height_cm || !user?.weight_kg || !user?.activity || !user?.goal
+  
+  if (profileIncomplete) {
+    // Первый запуск - только inline-кнопка
     await setUserState(userId, 'none')
     
     const message = `🤖 <b>C.I.D. — Care · Insight · Discipline</b>
@@ -215,22 +242,19 @@ async function handleStart(chatId: number, userId: number, username?: string) {
 Чтобы начать — заполните короткую форму.`
     
     await sendMessage(chatId, message, {
-      inline_keyboard: [
-        [{ text: '📝 Заполнить форму', callback_data: 'profile_edit' }]
-      ]
+      inline_keyboard: [[{ text: '⚙️ Настроить профиль', callback_data: 'profile_edit' }]]
     })
-  } else {
-    // Профиль заполнен - показываем главное меню
-    await setUserState(userId, 'none')
-    
-    const message = `🤖 <b>C.I.D. — Care · Insight · Discipline</b>
-
-Помогу рассчитать рацион, вести учёт и давать советы.
-
-👇 Выберите действие`
-    
-    await sendMessage(chatId, message, getMainMenuKeyboard())
+    return // ВАЖНО: не показываем главное меню
   }
+  
+  // Профиль заполнен - показываем главное меню (inline)
+  await setUserState(userId, 'none')
+  
+  const message = `🤖 <b>C.I.D. — Care · Insight · Discipline</b>
+
+Помогу рассчитать рацион, вести учёт и давать советы.`
+  
+  await sendMessage(chatId, message, getMainMenuInline())
 }
 
 async function handleWipe(chatId: number, userId: number) {
@@ -253,7 +277,7 @@ async function handleCallbackQuery(query: any) {
   
   switch (data) {
     case 'menu_main':
-      await handleStart(chatId, userId)
+      await sendMessage(chatId, '🏠 Главное меню', getMainMenuInline())
       break
       
     case 'menu_profile':
@@ -305,8 +329,8 @@ async function handleCallbackQuery(query: any) {
         await handleProfileCallback(chatId, userId, data)
       } else if (data.startsWith('confirm_calories_')) {
         await handleCaloriesConfirm(chatId, userId, data)
-      } else {
-        await sendMessage(chatId, 'Не понял. Выбери действие ниже ⬇️', getMainMenuKeyboard())
+          } else {
+        await sendMessage(chatId, 'Не понял. Выбери действие ниже ⬇️', getMainMenuInline())
       }
   }
 }
@@ -314,6 +338,7 @@ async function handleCallbackQuery(query: any) {
 async function handleText(chatId: number, userId: number, text: string) {
   const state = await getUserState(userId)
   
+  // Обработка FSM состояний
   if (state === 'plan_discussion') {
     await handlePlanDiscussion(chatId, userId, text)
   } else if (state === 'profile_age') {
@@ -327,7 +352,7 @@ async function handleText(chatId: number, userId: number, text: string) {
   } else if (state === 'meal_input') {
     await handleMealInput(chatId, userId, text)
   } else {
-    await sendMessage(chatId, 'Не понял. Выбери действие ниже ⬇️', getMainMenuKeyboard())
+    await sendMessage(chatId, 'Не понял. Выбери действие ниже ⬇️', getMainMenuInline())
   }
 }
 
@@ -545,7 +570,7 @@ async function applyPlanChanges(chatId: number, userId: number, intent: any, cur
   const minProtein = Math.round(user.weight_kg * 1.4)
   const minFat = Math.round(user.weight_kg * 0.6)
   
-  let warnings = []
+  let warnings: string[] = []
   if (newP < minProtein) {
     warnings.push(`Белок поднят до минимума ${minProtein}г (1.4 г/кг)`)
     newP = minProtein
@@ -594,7 +619,7 @@ async function applyPlanChanges(chatId: number, userId: number, intent: any, cur
     explanation += `. Калории сохранены (${newKcal} ккал)`
   }
   
-  let changesText = []
+  let changesText: string[] = []
   if (deltaP !== 0) changesText.push(`Белок ${deltaP > 0 ? '+' : ''}${deltaP}г`)
   if (deltaF !== 0) changesText.push(`Жиры ${deltaF > 0 ? '+' : ''}${deltaF}г`)
   if (deltaC !== 0) changesText.push(`Углеводы ${deltaC > 0 ? '+' : ''}${deltaC}г`)
@@ -644,12 +669,12 @@ async function handleCaloriesConfirm(chatId: number, userId: number, data: strin
   
   await sendMessage(chatId, `✅ План обновлён
 
-🥩 Б ${proteinG}г · 🥑 Ж ${fatG}г · 🍞 У ${carbsG}г · 📊 ${calories} ккал`, getMainMenuKeyboard())
+🥩 Б ${proteinG}г · 🥑 Ж ${fatG}г · 🍞 У ${carbsG}г · 📊 ${calories} ккал`, getMainMenuInline())
 }
 
 async function acceptPlan(chatId: number, userId: number) {
   await setUserState(userId, 'none')
-  await sendMessage(chatId, '✅ План принят!', getMainMenuKeyboard())
+  await sendMessage(chatId, '✅ План принят!', getMainMenuInline())
 }
 
 // === ПРОФИЛЬ ===
@@ -854,7 +879,7 @@ TDEE: ${tdee} ккал → цель ${goalAdjustment} = ${targetKcal} ккал
 // === СЕГОДНЯ ===
 
 async function handleTodayMenu(chatId: number, userId: number) {
-  await sendMessage(chatId, '📅 <b>Сегодня</b>', {
+  await sendMessage(chatId, '📅 <b>Сегодня</b>\n\nВыберите действие:', {
     inline_keyboard: [
       [{ text: '➕ Добавить приём', callback_data: 'today_add_meal' }],
       [{ text: '📈 Итог дня', callback_data: 'today_summary' }],
@@ -894,7 +919,7 @@ async function handleMealInput(chatId: number, userId: number, text: string) {
     ts: new Date().toISOString()
   })
   
-  const today = new Date().toISOString().split('T')[0]
+    const today = new Date().toISOString().split('T')[0]
     const { data: existing } = await supabase
     .from('daily_totals')
       .select('*')
@@ -927,7 +952,7 @@ async function handleMealInput(chatId: number, userId: number, text: string) {
   await sendMessage(chatId, `✅ Добавлено в дневник
 
 🔥 ${kcal} ккал
-🥩 ${protein}г белка · 🥑 ${fat}г жиров · 🍞 ${carbs}г углеводов`, getMainMenuKeyboard())
+🥩 ${protein}г белка · 🥑 ${fat}г жиров · 🍞 ${carbs}г углеводов`, getMainMenuInline())
 }
 
 async function showDaySummary(chatId: number, userId: number) {
@@ -948,7 +973,7 @@ async function showDaySummary(chatId: number, userId: number) {
     .maybeSingle()
   
   if (!totals || !plan) {
-    await sendMessage(chatId, '📊 Сегодня ещё нет приёмов пищи', getMainMenuKeyboard())
+    await sendMessage(chatId, '📊 Сегодня ещё нет приёмов пищи', getMainMenuInline())
     return
   }
   
@@ -968,7 +993,7 @@ async function showDaySummary(chatId: number, userId: number) {
 Сегодня: ${totals.kcal}/${plan.kcal} ккал (${kcalProgress}%)
 🥩 Б ${totals.p}/${plan.p} · 🥑 Ж ${totals.f}/${plan.f} · 🍞 У ${totals.c}/${plan.c}${advice}`
   
-  await sendMessage(chatId, message, getMainMenuKeyboard())
+  await sendMessage(chatId, message, getMainMenuInline())
 }
 
 // === НАПОМИНАНИЯ ===
@@ -1003,7 +1028,7 @@ async function handleHelp(chatId: number, userId: number) {
 /start — главное меню
 /wipe — удалить все данные`
   
-  await sendMessage(chatId, message, getMainMenuKeyboard())
+  await sendMessage(chatId, message, getMainMenuInline())
 }
 
 // === WIPE ===
@@ -1025,7 +1050,9 @@ async function wipeUserData(chatId: number, userId: number) {
     goal: null
   }).eq('user_id', userId)
   
-  await sendMessage(chatId, '✅ Все данные удалены', getMainMenuKeyboard())
+  await sendMessage(chatId, '✅ Данные удалены. Начнём заново?', {
+    inline_keyboard: [[{ text: '⚙️ Настроить профиль', callback_data: 'profile_edit' }]]
+  })
 }
 
 // === ВСПОМОГАТЕЛЬНЫЕ ===
