@@ -462,88 +462,6 @@ function nutritionCardKeyboard() {
 }
 
 /**
- * Главное меню (реплай клавиатура)
- */
-function getMainKeyboard() {
-  return {
-    keyboard: [
-      [
-        { text: "🍽 Питание" },
-        { text: "📊 Дневник" }
-      ],
-      [
-        { text: "⚙️ Настройки" }
-      ]
-    ],
-    resize_keyboard: true,
-    one_time_keyboard: false
-  }
-}
-
-/**
- * Меню питания
- */
-function getNutritionKeyboard() {
-  return {
-    keyboard: [
-      [
-        { text: "💸 Записать прием пищи" }
-      ],
-      [
-        { text: "📋 Меню рецептов" }
-      ],
-      [
-        { text: "🔙 Назад" }
-      ]
-    ],
-    resize_keyboard: true,
-    one_time_keyboard: false
-  }
-}
-
-/**
- * Меню дневника
- */
-function getDiaryKeyboard() {
-  return {
-    keyboard: [
-      [
-        { text: "📊 КБЖУ + Вода" }
-      ],
-      [
-        { text: "📝 Мои приемы пищи" }
-      ],
-      [
-        { text: "🔙 Назад" }
-      ]
-    ],
-    resize_keyboard: true,
-    one_time_keyboard: false
-  }
-}
-
-/**
- * Меню настроек
- */
-function getSettingsKeyboard() {
-  return {
-    keyboard: [
-      [
-        { text: "🔔 Уведомления" }
-      ],
-      [
-        { text: "👤 Профиль" }
-      ],
-      [
-        { text: "🔙 Назад" }
-      ]
-    ],
-    resize_keyboard: true,
-    one_time_keyboard: false
-  }
-}
-
-/**
  * Клавиатура выбора пола
  */
 function genderKeyboard() {
@@ -600,14 +518,12 @@ async function handleStartCommand(message: TelegramMessage) {
     .eq('user_id', user.id)
     .single()
   
-  // Если профиля нет - показываем приветствие
-  if (!profile) {
-    const welcomeMessage = `👋 **Привет, ${message.from.first_name}!** Я C.I.D. — Care • Insight • Discipline.
+  let welcomeMessage = `🤖 Привет! Я C.I.D. — Care • Insight • Discipline.
 
 Твой AI-наставник по питанию и привычкам.
 Я помогу тебе рассчитать рацион, вести учёт и не терять фокус.
 
-🎯 **Что я умею:**
+🎯 Что я умею:
 
 📊 Рассчитываю персональный КБЖУ на основе твоих данных (возраст, вес, рост, активность, цели) по научной методике Миффлина-Сан Жеора
 
@@ -622,78 +538,18 @@ async function handleStartCommand(message: TelegramMessage) {
 ✏️ Гибко настраиваю план питания через AI, учитываю твои пожелания и даю персональные советы
 
 Готов начать? 🚀`
-    
+  
+  if (!profile) {
     await sendMessage(message.chat.id, welcomeMessage, welcomeKeyboard())
-    return
-  }
-  
-  // Если профиль есть - показываем статистику за сегодня
-  const { data: plan } = await supabase
-    .from('nutrition_plans')
-    .select('*')
-    .eq('user_id', user.id)
-    .eq('is_active', true)
-    .single()
-  
-  if (!plan) {
-    await sendMessage(message.chat.id, `👋 **Привет, ${profile.name || message.from.first_name}!**\n\n✅ Твой профиль создан, но план КБЖУ еще не рассчитан.\n\nИспользуй меню для создания плана.`, getMainKeyboard())
-    return
-  }
-  
-  // Получаем статистику за сегодня
-  const today = new Date().toISOString().split('T')[0]
-  const { data: todayLogs } = await supabase
-    .from('food_logs')
-    .select('*')
-    .eq('user_id', user.id)
-    .gte('logged_at', `${today}T00:00:00`)
-  
-  // Считаем съеденное
-  const consumed = todayLogs?.reduce((acc, log) => ({
-    calories: acc.calories + (log.calories || 0),
-    protein: acc.protein + (log.protein || 0),
-    fats: acc.fats + (log.fats || 0),
-    carbs: acc.carbs + (log.carbs || 0)
-  }), { calories: 0, protein: 0, fats: 0, carbs: 0 }) || { calories: 0, protein: 0, fats: 0, carbs: 0 }
-  
-  const remaining = {
-    calories: plan.calories - consumed.calories,
-    protein: plan.protein - consumed.protein,
-    fats: plan.fats - consumed.fats,
-    carbs: plan.carbs - consumed.carbs
-  }
-  
-  // Определяем эмодзи для баланса
-  const balanceEmoji = remaining.calories > 0 ? '💚' : remaining.calories < 0 ? '❤️' : '💛'
-  const balanceSign = remaining.calories > 0 ? '+' : ''
-  
-  // Inline keyboard с quick actions
-  const keyboard = {
-    inline_keyboard: [
-      [
-        { text: "💸 Быстрая запись", callback_data: "quick_log_food" },
-        { text: "📋 Рецепты", callback_data: "menu_recipes" }
-      ],
-      [
-        { text: "📊 Подробная статистика", callback_data: "diary" }
+  } else {
+    welcomeMessage += `\n\n✅ Твой профиль уже создан!`
+    await sendMessage(message.chat.id, welcomeMessage, {
+      inline_keyboard: [
+        [{ text: "📊 Мой план КБЖУ", callback_data: "show_card" }],
+        [{ text: "✏️ Редактировать профиль", callback_data: "edit_profile" }]
       ]
-    ]
+    })
   }
-  
-  await sendMessage(
-    message.chat.id,
-    `👋 **Привет, ${profile.name || message.from.first_name}!**\n\n` +
-    `📊 **Прогресс за сегодня:**\n` +
-    `${balanceEmoji} **${balanceSign}${remaining.calories.toFixed(0)} ккал** (осталось)\n\n` +
-    `🥩 Белки: ${consumed.protein.toFixed(0)}/${plan.protein}г\n` +
-    `🥑 Жиры: ${consumed.fats.toFixed(0)}/${plan.fats}г\n` +
-    `🍞 Углеводы: ${consumed.carbs.toFixed(0)}/${plan.carbs}г\n\n` +
-    `Используй кнопки меню для управления питанием 👇`,
-    keyboard
-  )
-  
-  // Отправляем главное меню отдельным сообщением
-  await sendMessage(message.chat.id, "🏠 **Главное меню**", getMainKeyboard())
 }
 
 /**
@@ -950,7 +806,18 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
   
   // Главное меню
   else if (data === 'main_menu') {
-    await sendMessage(chatId, "🏠 **Главное меню**", getMainKeyboard())
+    await sendMessage(
+      chatId,
+      "🏠 **Главное меню**\n\nВыбери действие:",
+      {
+        inline_keyboard: [
+          [{ text: "🍽 Записать прием пищи", callback_data: "log_food" }],
+          [{ text: "📋 Меню рецептов", callback_data: "menu_recipes" }],
+          [{ text: "📊 Дневник", callback_data: "diary" }],
+          [{ text: "🔔 Уведомления", callback_data: "notifications_menu" }]
+        ]
+      }
+    )
   }
   
   // Меню уведомлений
@@ -968,41 +835,15 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
     await toggleNotifications(chatId, user.id, 'water')
   }
   
-  // Quick actions
-  else if (data === 'quick_log_food') {
-    await setUserState(userId, 'logging_food', {})
-    await sendMessage(
-      chatId,
-      `🍽 **Запись приема пищи**\n\nНапиши или наговори, что ты поел/выпил.\n\n💡 **Для точности:** укажи каждый продукт с граммовкой.\n📝 **Важно:** крупы взвешиваем в сухом виде, мясо — в готовом.\n\nМожешь написать примерно: "тарелка супа" или "рис с мясом" — я уточню детали.`,
-      {
-        inline_keyboard: [
-          [{ text: "❌ Отмена", callback_data: "cancel_action" }]
-        ]
-      }
-    )
-  }
-  
-  // Отмена действия
-  else if (data === 'cancel_action') {
-    await clearUserState(userId)
-    await sendMessage(chatId, "❌ Действие отменено", getMainKeyboard())
-  }
-  
   // Управление приемами пищи
   else if (data === 'manage_meals') {
     await manageMeals(chatId, user.id)
   }
   
-  // Удаление приема пищи (показать подтверждение)
+  // Удаление приема пищи
   else if (data.startsWith('delete_meal_')) {
     const mealId = parseInt(data.split('_')[2])
     await deleteMeal(chatId, user.id, mealId)
-  }
-  
-  // Подтверждение удаления приема пищи
-  else if (data.startsWith('confirm_delete_meal_')) {
-    const mealId = parseInt(data.split('_')[3])
-    await confirmDeleteMeal(chatId, user.id, mealId)
   }
   
   // Редактирование приема пищи
@@ -1035,179 +876,6 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
       await sendMessage(chatId, "❌ Прием пищи не найден")
     }
   }
-  
-  // Редактирование плана КБЖУ
-  else if (data === 'edit_nutrition') {
-    await sendMessage(
-      chatId,
-      `📊 **Изменение плана КБЖУ**\n\n` +
-      `Я могу пересчитать твой план на основе текущих параметров или ты можешь ввести желаемые значения вручную.\n\n` +
-      `Что ты хочешь сделать?`,
-      {
-        inline_keyboard: [
-          [{ text: "🔄 Пересчитать автоматически", callback_data: "recalculate_nutrition" }],
-          [{ text: "✏️ Ввести вручную", callback_data: "manual_nutrition" }],
-          [{ text: "🔙 Назад", callback_data: "cancel_action" }]
-        ]
-      }
-    )
-  }
-  
-  // Пересчет плана КБЖУ
-  else if (data === 'recalculate_nutrition') {
-    await sendMessage(chatId, "⏳ Пересчитываю твой план...")
-    
-    // Получаем профиль
-    const { data: profile } = await supabase
-      .from('user_profiles')
-      .select('*')
-      .eq('user_id', user.id)
-      .single()
-    
-    if (profile) {
-      try {
-        // Подготавливаем данные для генерации плана
-        const profileForPlan = { ...profile }
-        // Функция generateNutritionPlan ожидает current_weight
-        if (profile.weight !== undefined) {
-          profileForPlan.current_weight = profile.weight
-        }
-        
-        // Генерируем новый план
-        const plan = await generateNutritionPlan(profileForPlan)
-        
-        // Деактивируем старые планы
-        await supabase
-          .from('nutrition_plans')
-          .update({ is_active: false })
-          .eq('user_id', user.id)
-        
-        // Сохраняем новый план
-        await supabase
-          .from('nutrition_plans')
-          .insert({
-            user_id: user.id,
-            calories: plan.target_calories,
-            protein: plan.protein_grams,
-            fats: plan.fats_grams,
-            carbs: plan.carbs_grams,
-            water: plan.water_liters,
-            bmr: plan.bmr,
-            tdee: plan.tdee,
-            methodology_explanation: plan.methodology_explanation,
-            activity_recommendations: plan.activity_recommendations,
-            is_active: true
-          })
-        
-        await sendMessage(
-          chatId,
-          `✅ **План КБЖУ пересчитан!**\n\n` +
-          `🔥 Калории: ${plan.target_calories} ккал\n` +
-          `🍗 Белки: ${plan.protein_grams} г\n` +
-          `🥑 Жиры: ${plan.fats_grams} г\n` +
-          `🍞 Углеводы: ${plan.carbs_grams} г\n` +
-          `💧 Вода: ${plan.water_liters} л`,
-          {
-            inline_keyboard: [
-              [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
-            ]
-          }
-        )
-      } catch (error) {
-        console.error('Error recalculating nutrition plan:', error)
-        await sendMessage(chatId, "❌ Ошибка пересчета плана")
-      }
-    } else {
-      await sendMessage(chatId, "❌ Профиль не найден")
-    }
-  }
-  
-  // Ручной ввод плана КБЖУ
-  else if (data === 'manual_nutrition') {
-    await setUserState(userId, 'entering_manual_nutrition', {})
-    await sendMessage(
-      chatId,
-      `✏️ **Ручной ввод плана КБЖУ**\n\n` +
-      `Введи желаемые значения в формате:\n` +
-      `**Калории Белки Жиры Углеводы Вода**\n\n` +
-      `Например: **2000 120 60 250 2000**\n\n` +
-      `📝 Все значения указываются в граммах, вода - в мл`,
-      {
-        inline_keyboard: [
-          [{ text: "❌ Отмена", callback_data: "cancel_action" }]
-        ]
-      }
-    )
-  }
-  
-  // Редактирование параметров профиля
-  else if (data === 'edit_parameters') {
-    await sendMessage(
-      chatId,
-      `✏️ **Изменение параметров**\n\n` +
-      `Выбери, что хочешь изменить:`,
-      {
-        inline_keyboard: [
-          [{ text: "⚖️ Вес", callback_data: "edit_weight" }],
-          [{ text: "📏 Рост", callback_data: "edit_height" }],
-          [{ text: "🎂 Возраст", callback_data: "edit_age" }],
-          [{ text: "🏃 Активность", callback_data: "edit_activity" }],
-          [{ text: "🔙 Назад", callback_data: "cancel_action" }]
-        ]
-      }
-    )
-  }
-  
-  // Редактирование веса
-  else if (data === 'edit_weight') {
-    await setUserState(userId, 'editing_weight', {})
-    await sendMessage(
-      chatId,
-      `⚖️ **Изменение веса**\n\nВведи свой новый вес в килограммах:`,
-      {
-        inline_keyboard: [
-          [{ text: "❌ Отмена", callback_data: "cancel_action" }]
-        ]
-      }
-    )
-  }
-  
-  // Редактирование роста
-  else if (data === 'edit_height') {
-    await setUserState(userId, 'editing_height', {})
-    await sendMessage(
-      chatId,
-      `📏 **Изменение роста**\n\nВведи свой рост в сантиметрах:`,
-      {
-        inline_keyboard: [
-          [{ text: "❌ Отмена", callback_data: "cancel_action" }]
-        ]
-      }
-    )
-  }
-  
-  // Редактирование возраста
-  else if (data === 'edit_age') {
-    await setUserState(userId, 'editing_age', {})
-    await sendMessage(
-      chatId,
-      `🎂 **Изменение возраста**\n\nВведи свой возраст в годах:`,
-      {
-        inline_keyboard: [
-          [{ text: "❌ Отмена", callback_data: "cancel_action" }]
-        ]
-      }
-    )
-  }
-  
-  // Редактирование активности
-  else if (data === 'edit_activity') {
-    await sendMessage(
-      chatId,
-      `🏃 **Изменение уровня активности**\n\nВыбери свой уровень активности:`,
-      activityKeyboard()
-    )
-  }
 }
 
 /**
@@ -1219,28 +887,16 @@ async function handleTextMessage(message: TelegramMessage) {
   
   console.log('handleTextMessage - userId:', userId, 'text:', message.text, 'state:', stateData?.state)
   
+  if (!stateData) {
+    await sendMessage(message.chat.id, "Используй /start для начала работы")
+    return
+  }
+  
   const user = await getOrCreateUser(
     message.from.id,
     message.from.username,
     message.from.first_name
   )
-  
-  // Сначала проверяем навигационные кнопки (они работают без состояния)
-  const navigationButtons = ['🔙 Назад', '🍽 Питание', '📊 Дневник', '⚙️ Настройки', 
-                              '💸 Записать прием пищи', '📋 Меню рецептов',
-                              '📊 КБЖУ + Вода', '📝 Мои приемы пищи',
-                              '🔔 Уведомления', '👤 Профиль']
-  
-  if (navigationButtons.includes(message.text?.trim() || '')) {
-    const handled = await handleNavigationButtons(message, user)
-    if (handled) return
-  }
-  
-  // Если нет состояния и это не навигационная кнопка
-  if (!stateData) {
-    await sendMessage(message.chat.id, "Используй /start для начала работы")
-    return
-  }
   
   // Ожидание имени
   if (stateData.state === 'waiting_name') {
@@ -1319,18 +975,11 @@ async function handleTextMessage(message: TelegramMessage) {
       
       // Сохраняем профиль
       console.log('Saving user profile...')
-      const profileData = { ...stateData.data }
-      // Переименовываем current_weight в weight для соответствия схеме БД
-      if (profileData.current_weight !== undefined) {
-        profileData.weight = profileData.current_weight
-        delete profileData.current_weight
-      }
-      
       const { data: profile, error: profileError } = await supabase
         .from('user_profiles')
         .upsert({
           user_id: user.id,
-          ...profileData
+          ...stateData.data
         })
         .select()
         .single()
@@ -1494,208 +1143,6 @@ async function handleTextMessage(message: TelegramMessage) {
     if (!message.text) return
     await handleMealEdit(userId, message.chat.id, user.id, stateData.data.mealId, message.text)
   }
-  
-  // Редактирование веса
-  else if (stateData.state === 'editing_weight') {
-    if (!message.text) return
-    const weight = parseFloat(message.text.replace(',', '.'))
-    if (isNaN(weight) || weight < 30 || weight > 300) {
-      await sendMessage(message.chat.id, "❌ Пожалуйста, укажи корректный вес (30-300 кг)")
-      return
-    }
-    
-    // Обновляем вес в профиле
-    await supabase
-      .from('user_profiles')
-      .update({ weight: weight })
-      .eq('user_id', user.id)
-    
-    await clearUserState(userId)
-    await sendMessage(message.chat.id, `✅ Вес обновлен: **${weight} кг**\n\n💡 Хочешь пересчитать план КБЖУ с новым весом?`, {
-      inline_keyboard: [
-        [{ text: "🔄 Да, пересчитать", callback_data: "recalculate_nutrition" }],
-        [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
-      ]
-    })
-  }
-  
-  // Редактирование роста
-  else if (stateData.state === 'editing_height') {
-    if (!message.text) return
-    const height = parseFloat(message.text.replace(',', '.'))
-    if (isNaN(height) || height < 100 || height > 250) {
-      await sendMessage(message.chat.id, "❌ Пожалуйста, укажи корректный рост (100-250 см)")
-      return
-    }
-    
-    // Обновляем рост в профиле
-    await supabase
-      .from('user_profiles')
-      .update({ height: height })
-      .eq('user_id', user.id)
-    
-    await clearUserState(userId)
-    await sendMessage(message.chat.id, `✅ Рост обновлен: **${height} см**\n\n💡 Хочешь пересчитать план КБЖУ с новым ростом?`, {
-      inline_keyboard: [
-        [{ text: "🔄 Да, пересчитать", callback_data: "recalculate_nutrition" }],
-        [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
-      ]
-    })
-  }
-  
-  // Редактирование возраста
-  else if (stateData.state === 'editing_age') {
-    if (!message.text) return
-    const age = parseInt(message.text)
-    if (isNaN(age) || age < 10 || age > 120) {
-      await sendMessage(message.chat.id, "❌ Пожалуйста, укажи корректный возраст (10-120 лет)")
-      return
-    }
-    
-    // Обновляем возраст в профиле
-    await supabase
-      .from('user_profiles')
-      .update({ age: age })
-      .eq('user_id', user.id)
-    
-    await clearUserState(userId)
-    await sendMessage(message.chat.id, `✅ Возраст обновлен: **${age} лет**\n\n💡 Хочешь пересчитать план КБЖУ с новым возрастом?`, {
-      inline_keyboard: [
-        [{ text: "🔄 Да, пересчитать", callback_data: "recalculate_nutrition" }],
-        [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
-      ]
-    })
-  }
-  
-  // Ручной ввод КБЖУ
-  else if (stateData.state === 'entering_manual_nutrition') {
-    if (!message.text) return
-    const values = message.text.trim().split(/\s+/)
-    
-    if (values.length !== 5) {
-      await sendMessage(message.chat.id, "❌ Неверный формат. Введи 5 значений через пробел:\n**Калории Белки Жиры Углеводы Вода**")
-      return
-    }
-    
-    const [calories, protein, fat, carbs, water] = values.map(v => parseFloat(v.replace(',', '.')))
-    
-    if (calories < 500 || calories > 5000 || protein < 0 || fat < 0 || carbs < 0 || water < 0) {
-      await sendMessage(message.chat.id, "❌ Некорректные значения. Проверь введенные данные.")
-      return
-    }
-    
-    // Деактивируем старый план
-    await supabase
-      .from('nutrition_plans')
-      .update({ is_active: false })
-      .eq('user_id', user.id)
-    
-    // Создаем новый план
-    await supabase
-      .from('nutrition_plans')
-      .insert({
-        user_id: user.id,
-        calories: Math.round(calories),
-        protein: Math.round(protein),
-        fats: Math.round(fat),
-        carbs: Math.round(carbs),
-        water: Math.round(water / 1000), // Конвертируем мл в литры
-        is_active: true
-      })
-    
-    await clearUserState(userId)
-    await sendMessage(
-      message.chat.id,
-      `✅ **План КБЖУ обновлен!**\n\n` +
-      `🔥 Калории: ${Math.round(calories)} ккал\n` +
-      `🍗 Белки: ${Math.round(protein)} г\n` +
-      `🥑 Жиры: ${Math.round(fat)} г\n` +
-      `🍞 Углеводы: ${Math.round(carbs)} г\n` +
-      `💧 Вода: ${Math.round(water)} мл`,
-      {
-        inline_keyboard: [
-          [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
-        ]
-      }
-    )
-  }
-  
-  // Если состояние неизвестно - показываем главное меню
-  else {
-    console.log('Unhandled state:', stateData?.state, 'with text:', message.text)
-    await sendMessage(
-      message.chat.id, 
-      "❓ Используй кнопки меню для навигации",
-      getMainKeyboard()
-    )
-  }
-}
-
-/**
- * Обработка навигационных кнопок
- */
-async function handleNavigationButtons(message: TelegramMessage, user: any) {
-  const text = message.text?.trim()
-  const chatId = message.chat.id
-  
-  switch (text) {
-    // Главное меню
-    case '🔙 Назад':
-      await sendMessage(chatId, "🏠 **Главное меню**", getMainKeyboard())
-      break
-    
-    // Меню питания
-    case '🍽 Питание':
-      await sendMessage(chatId, "🍽 **Питание**\n\nУправление приемами пищи и рецептами", getNutritionKeyboard())
-      break
-    
-    case '💸 Записать прием пищи':
-      await setUserState(message.from.id, 'logging_food', {})
-      await sendMessage(
-        chatId,
-        `🍽 **Запись приема пищи**\n\nНапиши или наговори, что ты поел/выпил.\n\n💡 **Для точности:** укажи каждый продукт с граммовкой.\n📝 **Важно:** крупы взвешиваем в сухом виде, мясо — в готовом.\n\nМожешь написать примерно: "тарелка супа" или "рис с мясом" — я уточню детали.`
-      )
-      break
-    
-    case '📋 Меню рецептов':
-      await setUserState(message.from.id, 'requesting_recipe', {})
-      await sendMessage(
-        chatId,
-        `📋 **Меню рецептов**\n\nЧем я могу тебе помочь?\n\nТы можешь:\n• Рассказать, что хочешь поесть\n• Описать, что есть в холодильнике\n• Попросить утолить голод\n• Запросить меню на день или неделю\n\nЯ учту твой дневной КБЖУ и предложу подходящие варианты! 😊`
-      )
-      break
-    
-    // Меню дневника
-    case '📊 Дневник':
-      await sendMessage(chatId, "📊 **Дневник**\n\nТвоя статистика и приемы пищи", getDiaryKeyboard())
-      break
-    
-    case '📊 КБЖУ + Вода':
-      await showDiary(chatId, user.id)
-      break
-    
-    case '📝 Мои приемы пищи':
-      await manageMeals(chatId, user.id)
-      break
-    
-    // Меню настроек
-    case '⚙️ Настройки':
-      await sendMessage(chatId, "⚙️ **Настройки**\n\nУправление профилем и уведомлениями", getSettingsKeyboard())
-      break
-    
-    case '🔔 Уведомления':
-      await showNotificationsMenu(chatId, user.id)
-      break
-    
-    case '👤 Профиль':
-      await showProfileMenu(chatId, user.id)
-      break
-    
-    default:
-      return false // Не обработано
-  }
-  
-  return true // Обработано
 }
 
 /**
@@ -1908,7 +1355,7 @@ async function handleParameterEdit(userId: number, chatId: number, dbUserId: num
           await sendMessage(chatId, "❌ Пожалуйста, укажи корректный вес (30-300 кг)")
           return
         }
-        updates.weight = numValue
+        updates.current_weight = numValue
       } else if (param === 'height') {
         const numValue = parseFloat(value)
         if (isNaN(numValue) || numValue < 100 || numValue > 250) {
@@ -2031,8 +1478,8 @@ async function handleFoodLogging(userId: number, chatId: number, dbUserId: numbe
       return
     }
     
-    // Сохраняем запись и получаем ID
-    const { data: savedLog, error: saveError } = await supabase
+    // Сохраняем запись
+    await supabase
       .from('food_logs')
       .insert({
         user_id: dbUserId,
@@ -2043,12 +1490,6 @@ async function handleFoodLogging(userId: number, chatId: number, dbUserId: numbe
         carbs: analysis.carbs,
         logged_at: new Date().toISOString()
       })
-      .select()
-      .single()
-    
-    if (saveError) {
-      throw saveError
-    }
     
     // Формируем детализацию по продуктам
     let breakdownText = ''
@@ -2060,31 +1501,20 @@ async function handleFoodLogging(userId: number, chatId: number, dbUserId: numbe
       })
     }
     
-    const now = new Date()
-    const timeStr = now.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
-    
-    const resultText = `✅ **Прием пищи записан!**
+    const resultText = `✅ Прием пищи записан!
 
-📝 ${foodDescription}
+🔥 Калории: ${analysis.calories} ккал
+🥩 Белки: ${analysis.protein}г
+🥑 Жиры: ${analysis.fats}г
+🍞 Углеводы: ${analysis.carbs}г${breakdownText}
 
-🔥 ${analysis.calories} ккал | 🥩 Б: ${analysis.protein}г | 🥑 Ж: ${analysis.fats}г | 🍞 У: ${analysis.carbs}г${breakdownText}
-
-⏰ ${timeStr}
 💬 ${analysis.comment}`
     
-    // Post-action buttons: редактировать, удалить, статистика
     await sendMessage(chatId, resultText, {
       inline_keyboard: [
-        [
-          { text: "✏️ Изменить", callback_data: `edit_meal_${savedLog.id}` },
-          { text: "🗑 Удалить", callback_data: `delete_meal_${savedLog.id}` }
-        ],
-        [
-          { text: "📊 Статистика", callback_data: "diary" }
-        ],
-        [
-          { text: "🍽 Записать еще", callback_data: "quick_log_food" }
-        ]
+        [{ text: "🍽 Записать еще", callback_data: "log_food" }],
+        [{ text: "📊 Дневник", callback_data: "diary" }],
+        [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
       ]
     })
     
@@ -2346,149 +1776,43 @@ async function toggleNotifications(chatId: number, dbUserId: number, type: 'food
 }
 
 /**
- * Показать меню профиля пользователя
- */
-async function showProfileMenu(chatId: number, dbUserId: number) {
-  try {
-    // Получаем профиль и план
-    const { data: profile } = await supabase
-      .from('user_profiles')
-      .select('*')
-      .eq('user_id', dbUserId)
-      .single()
-    
-    const { data: plan } = await supabase
-      .from('nutrition_plans')
-      .select('*')
-      .eq('user_id', dbUserId)
-      .eq('is_active', true)
-      .single()
-    
-    if (!profile) {
-      await sendMessage(chatId, "❌ Профиль не найден. Заполни профиль через /start")
-      return
-    }
-    
-    const genderEmoji = profile.gender === 'male' ? '👨' : '👩'
-    const activityLevel = profile.activity_level === 'sedentary' ? 'Низкая' :
-                         profile.activity_level === 'lightly_active' ? 'Легкая' :
-                         profile.activity_level === 'moderately_active' ? 'Средняя' :
-                         profile.activity_level === 'very_active' ? 'Высокая' : 'Очень высокая'
-    
-    let profileText = `👤 **Твой профиль**\n\n`
-    profileText += `${genderEmoji} **Пол:** ${profile.gender === 'male' ? 'Мужской' : 'Женский'}\n`
-    profileText += `📏 **Рост:** ${profile.height} см\n`
-    profileText += `⚖️ **Вес:** ${profile.weight} кг\n`
-    profileText += `🎂 **Возраст:** ${profile.age} лет\n`
-    profileText += `🏃 **Активность:** ${activityLevel}\n\n`
-    
-    if (plan) {
-      profileText += `📊 **Твой план КБЖУ:**\n`
-      profileText += `🔥 Калории: ${plan.calories} ккал\n`
-      profileText += `🍗 Белки: ${plan.protein} г\n`
-      profileText += `🥑 Жиры: ${plan.fats} г\n`
-      profileText += `🍞 Углеводы: ${plan.carbs} г\n`
-      profileText += `💧 Вода: ${Math.round(plan.water * 1000)} мл\n\n`
-    }
-    
-    profileText += `💡 Здесь ты можешь отредактировать свои параметры или изменить план КБЖУ`
-    
-    await sendMessage(chatId, profileText, {
-      inline_keyboard: [
-        [{ text: "📊 Изменить план КБЖУ", callback_data: "edit_nutrition" }],
-        [{ text: "✏️ Изменить параметры", callback_data: "edit_parameters" }],
-        [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
-      ]
-    })
-  } catch (error) {
-    console.error('Error showing profile menu:', error)
-    await sendMessage(chatId, "❌ Ошибка загрузки профиля")
-  }
-}
-
-/**
- * Управление приемами пищи (за последние 2 дня)
+ * Управление приемами пищи
  */
 async function manageMeals(chatId: number, dbUserId: number) {
   try {
-    // Вычисляем дату 2 дня назад
-    const twoDaysAgo = new Date()
-    twoDaysAgo.setDate(twoDaysAgo.getDate() - 2)
-    const startDate = twoDaysAgo.toISOString().split('T')[0]
-    
-    // Получаем записи за последние 2 дня
-    const { data: logs } = await supabase
+    const today = new Date().toISOString().split('T')[0]
+    const { data: todayLogs } = await supabase
       .from('food_logs')
       .select('*')
       .eq('user_id', dbUserId)
-      .gte('logged_at', `${startDate}T00:00:00`)
+      .gte('logged_at', `${today}T00:00:00`)
       .order('logged_at', { ascending: false })
     
-    if (!logs || logs.length === 0) {
-      await sendMessage(chatId, "📝 **Нет записей за последние 2 дня**\n\nДобавь первый прием пищи!", {
+    if (!todayLogs || todayLogs.length === 0) {
+      await sendMessage(chatId, "📝 Нет записей за сегодня", {
         inline_keyboard: [
-          [{ text: "🍽 Записать прием", callback_data: "quick_log_food" }],
-          [{ text: "🔙 Назад", callback_data: "cancel_action" }]
+          [{ text: "📊 Назад к дневнику", callback_data: "diary" }]
         ]
       })
       return
     }
     
-    // Группируем записи по дням
-    const logsByDate: { [key: string]: any[] } = {}
-    logs.forEach(log => {
-      const date = new Date(log.logged_at).toISOString().split('T')[0]
-      if (!logsByDate[date]) {
-        logsByDate[date] = []
-      }
-      logsByDate[date].push(log)
-    })
+    let message = `📝 **Управление приемами пищи**\n\nВыбери прием для редактирования или удаления:\n\n`
     
-    let message = `📝 **Приемы пищи за последние 2 дня**\n\n`
     const keyboard: any = { inline_keyboard: [] }
     
-    // Форматируем дату
-    const formatDate = (dateStr: string) => {
-      const date = new Date(dateStr)
-      const today = new Date().toISOString().split('T')[0]
-      const yesterday = new Date()
-      yesterday.setDate(yesterday.getDate() - 1)
-      const yesterdayStr = yesterday.toISOString().split('T')[0]
+    todayLogs.forEach((log, index) => {
+      const time = new Date(log.logged_at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
+      const shortDesc = log.description.length > 40 ? log.description.substring(0, 40) + '...' : log.description
+      message += `${index + 1}. **${time}** - ${shortDesc}\n   🔥 ${log.calories}ккал | Б:${log.protein}г | Ж:${log.fats}г | У:${log.carbs}г\n\n`
       
-      if (dateStr === today) return '📅 **Сегодня**'
-      if (dateStr === yesterdayStr) return '📅 **Вчера**'
-      return `📅 **${date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}**`
-    }
-    
-    // Отображаем записи по дням
-    let mealIndex = 0
-    Object.keys(logsByDate).sort().reverse().forEach(date => {
-      message += `${formatDate(date)}\n\n`
-      
-      logsByDate[date].forEach(log => {
-        mealIndex++
-        const time = new Date(log.logged_at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
-        const shortDesc = log.description.length > 30 ? log.description.substring(0, 30) + '...' : log.description
-        
-        message += `**${mealIndex}.** ⏰ ${time} - ${shortDesc}\n`
-        message += `   🔥 ${log.calories}ккал | Б:${log.protein}г | Ж:${log.fats}г | У:${log.carbs}г\n`
-        
-        // Inline кнопки для каждого приема
-        keyboard.inline_keyboard.push([
-          { text: `✏️ #${mealIndex}`, callback_data: `edit_meal_${log.id}` },
-          { text: `🗑 #${mealIndex}`, callback_data: `delete_meal_${log.id}` }
-        ])
-        
-        message += '\n'
-      })
+      keyboard.inline_keyboard.push([
+        { text: `✏️ Изменить #${index + 1}`, callback_data: `edit_meal_${log.id}` },
+        { text: `🗑 Удалить #${index + 1}`, callback_data: `delete_meal_${log.id}` }
+      ])
     })
     
-    // Навигационные кнопки
-    keyboard.inline_keyboard.push(
-      [{ text: "🍽 Добавить прием", callback_data: "quick_log_food" }],
-      [{ text: "📊 Статистика", callback_data: "diary" }],
-      [{ text: "🔙 Назад", callback_data: "cancel_action" }]
-    )
+    keyboard.inline_keyboard.push([{ text: "📊 Назад к дневнику", callback_data: "diary" }])
     
     await sendMessage(chatId, message, keyboard)
   } catch (error) {
@@ -2498,54 +1822,11 @@ async function manageMeals(chatId: number, dbUserId: number) {
 }
 
 /**
- * Показать подтверждение удаления приема пищи
+ * Удалить прием пищи
  */
 async function deleteMeal(chatId: number, dbUserId: number, mealId: number) {
   try {
-    // Получаем информацию о приеме
-    const { data: meal } = await supabase
-      .from('food_logs')
-      .select('*')
-      .eq('id', mealId)
-      .eq('user_id', dbUserId)
-      .single()
-    
-    if (!meal) {
-      await sendMessage(chatId, "❌ Прием пищи не найден")
-      return
-    }
-    
-    const time = new Date(meal.logged_at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
-    
-    // Показываем подтверждение с деталями
-    await sendMessage(
-      chatId,
-      `⚠️ **Подтвердите удаление**\n\n` +
-      `⏰ ${time}\n` +
-      `📝 ${meal.description}\n` +
-      `🔥 ${meal.calories} ккал | 🥩 Б:${meal.protein}г | 🥑 Ж:${meal.fats}г | 🍞 У:${meal.carbs}г\n\n` +
-      `Это действие нельзя отменить.`,
-      {
-        inline_keyboard: [
-          [
-            { text: "✅ Да, удалить", callback_data: `confirm_delete_meal_${mealId}` },
-            { text: "❌ Отмена", callback_data: "manage_meals" }
-          ]
-        ]
-      }
-    )
-  } catch (error) {
-    console.error('Error showing delete confirmation:', error)
-    await sendMessage(chatId, "❌ Ошибка")
-  }
-}
-
-/**
- * Подтвердить удаление приема пищи
- */
-async function confirmDeleteMeal(chatId: number, dbUserId: number, mealId: number) {
-  try {
-    // Получаем информацию о приеме
+    // Получаем информацию о приеме перед удалением
     const { data: meal } = await supabase
       .from('food_logs')
       .select('*')
@@ -2572,14 +1853,11 @@ async function confirmDeleteMeal(chatId: number, dbUserId: number, mealId: numbe
     const time = new Date(meal.logged_at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
     await sendMessage(
       chatId,
-      `✅ **Прием пищи удален**\n\n⏰ ${time}\n📝 ${meal.description}`,
-      {
-        inline_keyboard: [
-          [{ text: "📝 Мои приемы", callback_data: "manage_meals" }],
-          [{ text: "🔙 Назад", callback_data: "cancel_action" }]
-        ]
-      }
+      `✅ Прием пищи удален!\n\n⏰ ${time}\n📝 ${meal.description}\n🔥 ${meal.calories}ккал`
     )
+    
+    // Показываем обновленный список
+    await manageMeals(chatId, dbUserId)
   } catch (error) {
     console.error('Error deleting meal:', error)
     await sendMessage(chatId, "❌ Ошибка удаления приема пищи")
