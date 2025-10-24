@@ -1066,15 +1066,8 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
     
     if (profile) {
       try {
-        // Подготавливаем данные для генерации плана
-        const profileForPlan = { ...profile }
-        // Функция generateNutritionPlan ожидает current_weight
-        if (profile.weight !== undefined) {
-          profileForPlan.current_weight = profile.weight
-        }
-        
         // Генерируем новый план
-        const plan = await generateNutritionPlan(profileForPlan)
+        const plan = await generateNutritionPlan(profile)
         
         // Деактивируем старые планы
         await supabase
@@ -1319,18 +1312,11 @@ async function handleTextMessage(message: TelegramMessage) {
       
       // Сохраняем профиль
       console.log('Saving user profile...')
-      const profileData = { ...stateData.data }
-      // Переименовываем current_weight в weight для соответствия схеме БД
-      if (profileData.current_weight !== undefined) {
-        profileData.weight = profileData.current_weight
-        delete profileData.current_weight
-      }
-      
       const { data: profile, error: profileError } = await supabase
         .from('user_profiles')
         .upsert({
           user_id: user.id,
-          ...profileData
+          ...stateData.data
         })
         .select()
         .single()
@@ -1507,7 +1493,7 @@ async function handleTextMessage(message: TelegramMessage) {
     // Обновляем вес в профиле
     await supabase
       .from('user_profiles')
-      .update({ weight: weight })
+      .update({ current_weight: weight })
       .eq('user_id', user.id)
     
     await clearUserState(userId)
@@ -1908,7 +1894,7 @@ async function handleParameterEdit(userId: number, chatId: number, dbUserId: num
           await sendMessage(chatId, "❌ Пожалуйста, укажи корректный вес (30-300 кг)")
           return
         }
-        updates.weight = numValue
+        updates.current_weight = numValue
       } else if (param === 'height') {
         const numValue = parseFloat(value)
         if (isNaN(numValue) || numValue < 100 || numValue > 250) {
@@ -2378,7 +2364,7 @@ async function showProfileMenu(chatId: number, dbUserId: number) {
     let profileText = `👤 **Твой профиль**\n\n`
     profileText += `${genderEmoji} **Пол:** ${profile.gender === 'male' ? 'Мужской' : 'Женский'}\n`
     profileText += `📏 **Рост:** ${profile.height} см\n`
-    profileText += `⚖️ **Вес:** ${profile.weight} кг\n`
+    profileText += `⚖️ **Вес:** ${profile.current_weight} кг\n`
     profileText += `🎂 **Возраст:** ${profile.age} лет\n`
     profileText += `🏃 **Активность:** ${activityLevel}\n\n`
     
