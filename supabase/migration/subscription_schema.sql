@@ -65,15 +65,27 @@ CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
 CREATE INDEX IF NOT EXISTS idx_usage_logs_user_id ON usage_logs(user_id);
 CREATE INDEX IF NOT EXISTS idx_usage_logs_created_at ON usage_logs(created_at);
 
+-- Добавляем UNIQUE constraint на name
+DO $$ 
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint 
+    WHERE conname = 'subscription_plans_name_key'
+  ) THEN
+    ALTER TABLE subscription_plans ADD CONSTRAINT subscription_plans_name_key UNIQUE (name);
+  END IF;
+END $$;
+
 -- Вставка стандартных планов подписки
 INSERT INTO subscription_plans (name, duration_days, price_amount, price_currency, features) VALUES
 ('trial', 7, 0.00, 'RUB', '{"name": "Пробный период", "description": "7 дней бесплатно", "limits": {"food_logs_per_day": 10, "recipe_requests_per_day": 5}}'),
 ('monthly', 30, 78.00, 'RUB', '{"name": "Месячная подписка", "description": "1 месяц", "limits": null}'),
 ('quarterly', 90, 178.00, 'RUB', '{"name": "Квартальная подписка", "description": "3 месяца", "discount": "22%", "limits": null}'),
 ('yearly', 365, 878.00, 'RUB', '{"name": "Годовая подписка", "description": "12 месяцев", "discount": "44%", "limits": null}')
-ON CONFLICT DO NOTHING;
+ON CONFLICT (name) DO NOTHING;
 
 -- Функция для проверки активной подписки
+DROP FUNCTION IF EXISTS check_subscription_status(BIGINT);
 CREATE OR REPLACE FUNCTION check_subscription_status(p_user_id BIGINT)
 RETURNS TABLE (
     has_active_subscription BOOLEAN,

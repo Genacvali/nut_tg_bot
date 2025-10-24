@@ -1466,7 +1466,15 @@ async function handleTextMessage(message: TelegramMessage) {
   else if (stateData.state === 'logging_food') {
     if (!message.text) return
     const clarificationAttempt = stateData.data?.clarification_attempt || 0
-    await handleFoodLogging(userId, message.chat.id, user.id, message.text, clarificationAttempt)
+    
+    // Если это ответ на уточнение - комбинируем с исходным описанием
+    let fullDescription = message.text
+    if (clarificationAttempt > 0 && stateData.data?.original_description) {
+      fullDescription = `${stateData.data.original_description} ${message.text}`
+      console.log('Combined food description:', fullDescription)
+    }
+    
+    await handleFoodLogging(userId, message.chat.id, user.id, fullDescription, clarificationAttempt)
   }
   
   // Запрос рецепта
@@ -1953,7 +1961,9 @@ async function handleFoodLogging(userId: number, chatId: number, dbUserId: numbe
     // Анализируем через OpenAI
     const clarificationNote = clarificationAttempt > 0 
       ? '\n⚠️ ВАЖНО: Клиент уже дал уточнение. Работай с той информацией, что есть. НЕ запрашивай дополнительные уточнения. Рассчитай КБЖУ на основе предоставленных данных, используя средние значения для неизвестных параметров.'
-      : '\n1. Если граммовка не указана - уточни примерный вес порции (ТОЛЬКО ОДИН РАЗ)'
+      : `\n1. ВНИМАТЕЛЬНО проверь описание: если УЖЕ указаны граммы/мл/штуки (например: "банан 150г", "яблоко 200г", "рис 100г курица 150г") - НЕ запрашивай уточнение!
+2. Запрашивай уточнение ТОЛЬКО если веса РЕАЛЬНО отсутствуют (например: "банан", "тарелка супа", "порция риса")
+3. Если хотя бы один продукт без веса - спроси про него`
     
     const prompt = `Ты - C.I.D., AI-диетолог. Проанализируй прием пищи клиента.
 
@@ -1962,9 +1972,14 @@ async function handleFoodLogging(userId: number, chatId: number, dbUserId: numbe
 Дневной план: ${plan.calories} ккал (Б: ${plan.protein}г, Ж: ${plan.fats}г, У: ${plan.carbs}г)
 
 Задачи:${clarificationNote}
-2. Рассчитай КБЖУ этого приема
-3. Распиши детализацию по каждому продукту (название, вес, КБЖУ)
-4. Дай краткий комментарий (вписывается ли в план)
+4. Рассчитай КБЖУ этого приема
+5. Распиши детализацию по каждому продукту (название, вес, КБЖУ)
+6. Дай краткий комментарий (вписывается ли в план)
+
+ВАЖНО: 
+- Если в описании есть цифры с "г", "мл", "кг" - это УЖЕ указанный вес, используй его!
+- Примеры с указанным весом: "банан 400г", "овсянка 60г", "молоко 200мл"
+- Примеры БЕЗ веса: "банан", "тарелка супа", "порция курицы"
 
 Верни JSON:
 {
@@ -2010,7 +2025,11 @@ async function handleFoodLogging(userId: number, chatId: number, dbUserId: numbe
     
     // Разрешаем уточнение только один раз
     if (analysis.need_clarification && clarificationAttempt === 0) {
-      await setUserState(userId, 'logging_food', { clarification_attempt: 1 })
+      // ВАЖНО: сохраняем исходное описание еды!
+      await setUserState(userId, 'logging_food', { 
+        clarification_attempt: 1,
+        original_description: foodDescription
+      })
       await sendMessage(chatId, `❓ ${analysis.clarification_question}`, {
         inline_keyboard: [[{ text: "🏠 Главное меню", callback_data: "main_menu" }]]
       })
@@ -2022,7 +2041,7 @@ async function handleFoodLogging(userId: number, chatId: number, dbUserId: numbe
       .from('food_logs')
       .insert({
         user_id: dbUserId,
-        description: foodDescription,
+        description: foodDescription, // Это уже полное описание (исходное + уточнение)
         calories: analysis.calories,
         protein: analysis.protein,
         fats: analysis.fats,
