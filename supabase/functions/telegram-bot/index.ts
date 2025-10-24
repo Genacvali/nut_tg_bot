@@ -764,6 +764,35 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
     callbackQuery.from.first_name
   )
   
+  // БЛОКИРОВКА: Проверяем подписку (кроме действий связанных с оплатой и регистрацией)
+  const allowedActions = ['fill_profile', 'buy_subscription', 'show_profile', 'gender_', 'activity_', 'goal_'];
+  const isAllowed = allowedActions.some(action => data.startsWith(action)) || data.startsWith('select_plan_');
+  
+  if (!isAllowed) {
+    const subscriptionData = await getSubscriptionInfo(user.id)
+    const subscriptionInfo = Array.isArray(subscriptionData) ? subscriptionData[0] : subscriptionData
+    
+    // Если подписка истекла и это не unlimited
+    if (subscriptionInfo && subscriptionInfo.needs_payment && !subscriptionInfo.is_unlimited) {
+      const blockMessage = `⏰ **Пробный период истек**\n\n` +
+        `😔 К сожалению, твой 7-дневный пробный период подошел к концу.\n\n` +
+        `💎 **Продолжи пользоваться C.I.D.** — выбери подходящий тариф:\n\n` +
+        `⚡ **1 месяц** — 199₽ (Попробовать)\n` +
+        `🔥 **3 месяца** — 499₽ (Популярный)\n` +
+        `💎 **1 год** — 1990₽ (Выгодно!)\n\n` +
+        `🔒 Безопасная оплата через T-Bank\n` +
+        `✨ Подписка активируется моментально`
+      
+      await sendMessage(chatId, blockMessage, {
+        inline_keyboard: [
+          [{ text: "💳 Оформить подписку", callback_data: "buy_subscription" }],
+          [{ text: "👤 Мой профиль", callback_data: "show_profile" }]
+        ]
+      })
+      return // Блокируем дальнейшую обработку
+    }
+  }
+  
   // Начало заполнения профиля
   if (data === 'fill_profile') {
     await setUserState(userId, 'waiting_name', {})
@@ -1041,11 +1070,11 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
   
   // Купить подписку
   else if (data === 'buy_subscription') {
-    // Получаем доступные планы
+    // Получаем только платные планы (monthly, quarterly, yearly)
     const { data: plans } = await supabase
       .from('subscription_plans')
       .select('*')
-      .neq('name', 'Trial')
+      .in('name', ['monthly', 'quarterly', 'yearly'])
       .order('duration_days', { ascending: true })
     
     if (!plans || plans.length === 0) {
@@ -1053,26 +1082,45 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
       return
     }
     
-    let message = `💳 **Оформление подписки**\n\n`
-    message += `Выбери подходящий план:\n\n`
+    let message = `💎 **Оформление подписки C.I.D.**\n\n`
+    message += `Выбери подходящий тариф:\n\n`
     
     const keyboard: any[] = []
     
+    // Emoji для каждого плана
+    const planEmoji: Record<string, string> = {
+      'monthly': '⚡',
+      'quarterly': '🔥',
+      'yearly': '💎'
+    }
+    
     for (const plan of plans) {
-      const priceRub = plan.price_rub || (plan.price_usd * 95) // Fallback к USD
-      const durationText = plan.duration_days === 30 ? '1 месяц' :
-                          plan.duration_days === 90 ? '3 месяца' :
-                          plan.duration_days === 365 ? '1 год' : `${plan.duration_days} дней`
+      const priceRub = plan.price_rub || 0
+      const emoji = planEmoji[plan.name] || '✨'
       
-      message += `📦 **${durationText}** - ${priceRub}₽\n`
+      let durationText = ''
+      let description = ''
+      
+      if (plan.name === 'monthly') {
+        durationText = '1 месяц'
+        description = 'Попробовать'
+      } else if (plan.name === 'quarterly') {
+        durationText = '3 месяца'
+        description = 'Популярный'
+      } else if (plan.name === 'yearly') {
+        durationText = '1 год'
+        description = 'Выгодно!'
+      }
+      
+      message += `${emoji} **${durationText}** — ${priceRub}₽ (${description})\n`
       keyboard.push([{ 
-        text: `📦 ${durationText} - ${priceRub}₽`, 
+        text: `${emoji} ${durationText} — ${priceRub}₽`, 
         callback_data: `select_plan_${plan.id}` 
       }])
     }
     
-    message += `\n💡 **Безопасная оплата через T-Bank**\n`
-    message += `После оплаты подписка активируется автоматически.`
+    message += `\n🔒 **Безопасная оплата через T-Bank**\n`
+    message += `✨ Подписка активируется моментально после оплаты`
     
     keyboard.push([{ text: "🔙 Назад", callback_data: "show_profile" }])
     
@@ -1411,6 +1459,32 @@ async function handleTextMessage(message: TelegramMessage) {
     message.from.username,
     message.from.first_name
   )
+  
+  // БЛОКИРОВКА: Проверяем подписку (кроме команды /start)
+  if (message.text !== '/start') {
+    const subscriptionData = await getSubscriptionInfo(user.id)
+    const subscriptionInfo = Array.isArray(subscriptionData) ? subscriptionData[0] : subscriptionData
+    
+    // Если подписка истекла и это не unlimited
+    if (subscriptionInfo && subscriptionInfo.needs_payment && !subscriptionInfo.is_unlimited) {
+      const blockMessage = `⏰ **Пробный период истек**\n\n` +
+        `😔 К сожалению, твой 7-дневный пробный период подошел к концу.\n\n` +
+        `💎 **Продолжи пользоваться C.I.D.** — выбери подходящий тариф:\n\n` +
+        `⚡ **1 месяц** — 199₽ (Попробовать)\n` +
+        `🔥 **3 месяца** — 499₽ (Популярный)\n` +
+        `💎 **1 год** — 1990₽ (Выгодно!)\n\n` +
+        `🔒 Безопасная оплата через T-Bank\n` +
+        `✨ Подписка активируется моментально`
+      
+      await sendMessage(message.chat.id, blockMessage, {
+        inline_keyboard: [
+          [{ text: "💳 Оформить подписку", callback_data: "buy_subscription" }],
+          [{ text: "👤 Мой профиль", callback_data: "show_profile" }]
+        ]
+      })
+      return // Блокируем дальнейшую обработку
+    }
+  }
   
   // Сначала проверяем навигационные кнопки (они работают без состояния)
   const navigationButtons = ['🔙 Назад', '💬 Диалог с C.I.D.', '📊 Дневник', '⚙️ Настройки',
@@ -2620,15 +2694,18 @@ async function showProfileMenu(chatId: number, dbUserId: number) {
     }
     
     // Получаем информацию о подписке
-    const subscriptionInfo = await getSubscriptionInfo(dbUserId)
+    const subscriptionData = await getSubscriptionInfo(dbUserId)
+    const subscriptionInfo = Array.isArray(subscriptionData) ? subscriptionData[0] : subscriptionData
+    
+    console.log('Subscription info:', JSON.stringify(subscriptionInfo))
     
     if (subscriptionInfo) {
       profileText += `📦 **Подписка:**\n`
       
       if (subscriptionInfo.is_unlimited) {
         profileText += `✨ **Безлимитная** (подарок от админа)\n\n`
-      } else if (subscriptionInfo.is_trial) {
-        const daysLeft = Math.ceil((new Date(subscriptionInfo.end_date).getTime() - Date.now()) / (1000 * 60 * 60 * 24))
+      } else if (subscriptionInfo.is_trial && !subscriptionInfo.needs_payment) {
+        const daysLeft = Math.ceil((new Date(subscriptionInfo.expires_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24))
         profileText += `🎁 **Пробный период:** ${daysLeft} ${daysLeft === 1 ? 'день' : daysLeft < 5 ? 'дня' : 'дней'} осталось\n`
         profileText += `\n💡 Сейчас ничего вводить не нужно. После истечения пробного периода появится кнопка оплаты.\n\n`
       } else if (subscriptionInfo.needs_payment) {
@@ -2638,7 +2715,7 @@ async function showProfileMenu(chatId: number, dbUserId: number) {
         profileText += `📦 3 месяца - 499₽\n`
         profileText += `📦 1 год - 1990₽\n\n`
       } else {
-        const daysLeft = Math.ceil((new Date(subscriptionInfo.end_date).getTime() - Date.now()) / (1000 * 60 * 60 * 24))
+        const daysLeft = Math.ceil((new Date(subscriptionInfo.expires_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24))
         profileText += `✅ **Активна:** ${subscriptionInfo.plan_name}\n`
         profileText += `⏰ **Осталось:** ${daysLeft} ${daysLeft === 1 ? 'день' : daysLeft < 5 ? 'дня' : 'дней'}\n\n`
       }

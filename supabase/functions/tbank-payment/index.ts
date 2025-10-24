@@ -23,13 +23,27 @@ interface PaymentRequest {
 
 // Генерация Token для T-Bank (SHA-256 подпись)
 async function generateToken(params: Record<string, any>, password: string): Promise<string> {
+  // Исключаем сложные объекты (Receipt, DATA, Shops и т.д.)
+  // Только простые параметры участвуют в подписи!
+  const simpleParams: Record<string, any> = {};
+  
+  for (const [key, value] of Object.entries(params)) {
+    // Пропускаем объекты и массивы
+    if (typeof value !== 'object' || value === null) {
+      simpleParams[key] = value;
+    }
+  }
+  
   // Добавляем пароль
-  const paramsWithPassword = { ...params, Password: password };
+  const paramsWithPassword = { ...simpleParams, Password: password };
   
   // Сортируем ключи и создаем строку
   const sortedKeys = Object.keys(paramsWithPassword).sort();
   const values = sortedKeys.map(key => String(paramsWithPassword[key]));
   const concatenated = values.join("");
+  
+  console.log('Token generation params:', sortedKeys);
+  console.log('Token string:', concatenated);
   
   // Хешируем SHA-256
   const encoder = new TextEncoder();
@@ -114,17 +128,30 @@ serve(async (req) => {
     const successUrl = `https://t.me/${botUsername}?start=payment_success`;
     const failUrl = `https://t.me/${botUsername}?start=payment_failed`;
 
+    // Чек для 54-ФЗ (обязательно!)
+    const receipt = {
+      Email: "support@cid-bot.ru", // Email для отправки чека (можно заменить на email пользователя если есть)
+      Taxation: "usn_income", // УСН доход (упрощенная система налогообложения)
+      Items: [
+        {
+          Name: `Подписка C.I.D. (${plan.name === 'monthly' ? '1 месяц' : plan.name === 'quarterly' ? '3 месяца' : '1 год'})`,
+          Price: amountKopeks, // Цена в копейках
+          Quantity: 1.00,
+          Amount: amountKopeks, // Сумма = Price * Quantity
+          Tax: "none", // Без НДС
+          PaymentMethod: "full_prepayment", // Полная предоплата
+          PaymentObject: "service" // Услуга
+        }
+      ]
+    };
+
     // Параметры запроса к T-Bank
     const initParams: Record<string, any> = {
       TerminalKey: terminalKey,
       Amount: amountKopeks,
       OrderId: orderId,
       Description: `Подписка C.I.D.: ${plan.name}`,
-      // DATA: JSON.stringify({
-      //   userId: userId,
-      //   planId: planId,
-      //   paymentIntentId: paymentIntent,
-      // }),
+      Receipt: receipt, // Добавляем чек!
       SuccessURL: successUrl,
       FailURL: failUrl,
       Language: "ru",
