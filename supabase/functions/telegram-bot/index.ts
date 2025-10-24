@@ -679,7 +679,8 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
       inline_keyboard: [
         [{ text: "🍽 Записать прием пищи", callback_data: "log_food" }],
         [{ text: "📋 Меню рецептов", callback_data: "menu_recipes" }],
-        [{ text: "📊 Дневник", callback_data: "diary" }]
+        [{ text: "📊 Дневник", callback_data: "diary" }],
+        [{ text: "🔔 Уведомления", callback_data: "notifications_menu" }]
       ]
     })
   }
@@ -812,10 +813,26 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
         inline_keyboard: [
           [{ text: "🍽 Записать прием пищи", callback_data: "log_food" }],
           [{ text: "📋 Меню рецептов", callback_data: "menu_recipes" }],
-          [{ text: "📊 Дневник", callback_data: "diary" }]
+          [{ text: "📊 Дневник", callback_data: "diary" }],
+          [{ text: "🔔 Уведомления", callback_data: "notifications_menu" }]
         ]
       }
     )
+  }
+  
+  // Меню уведомлений
+  else if (data === 'notifications_menu') {
+    await showNotificationsMenu(chatId, user.id)
+  }
+  
+  // Переключение уведомлений о еде
+  else if (data === 'toggle_food_notifications') {
+    await toggleNotifications(chatId, user.id, 'food')
+  }
+  
+  // Переключение уведомлений о воде
+  else if (data === 'toggle_water_notifications') {
+    await toggleNotifications(chatId, user.id, 'water')
   }
 }
 
@@ -1479,6 +1496,107 @@ async function handleVoiceMessage(message: TelegramMessage) {
   } catch (error) {
     console.error('Error handling voice message:', error)
     await sendMessage(chatId, "❌ Ошибка обработки голосового сообщения. Попробуй написать текстом.")
+  }
+}
+
+/**
+ * Показать меню уведомлений
+ */
+async function showNotificationsMenu(chatId: number, dbUserId: number) {
+  try {
+    // Получаем или создаем настройки уведомлений
+    let { data: settings } = await supabase
+      .from('notification_settings')
+      .select('*')
+      .eq('user_id', dbUserId)
+      .single()
+    
+    // Если настроек нет, создаем с дефолтными значениями
+    if (!settings) {
+      const { data: newSettings } = await supabase
+        .from('notification_settings')
+        .insert({
+          user_id: dbUserId,
+          food_notifications_enabled: true,
+          water_notifications_enabled: true
+        })
+        .select()
+        .single()
+      
+      settings = newSettings
+    }
+    
+    const foodStatus = settings.food_notifications_enabled ? '✅ Вкл' : '❌ Выкл'
+    const waterStatus = settings.water_notifications_enabled ? '✅ Вкл' : '❌ Выкл'
+    
+    const menuText = `🔔 **Настройки уведомлений**
+
+📊 **Уведомления о еде:** ${foodStatus}
+Напоминания о приемах пищи с ${settings.food_notification_start_time.substring(0, 5)} до ${settings.food_notification_end_time.substring(0, 5)}
+Количество напоминаний: ${settings.food_notification_count} раз в день
+
+💧 **Уведомления о воде:** ${waterStatus}
+Напоминания пить воду с ${settings.water_notification_start_time.substring(0, 5)} до ${settings.water_notification_end_time.substring(0, 5)}
+Интервал: каждые ${settings.water_notification_interval_minutes} минут
+
+💡 Уведомления помогут тебе не забывать о питании и поддерживать водный баланс!`
+    
+    await sendMessage(chatId, menuText, {
+      inline_keyboard: [
+        [{ 
+          text: settings.food_notifications_enabled ? "🍽 Еда: Выключить" : "🍽 Еда: Включить", 
+          callback_data: "toggle_food_notifications" 
+        }],
+        [{ 
+          text: settings.water_notifications_enabled ? "💧 Вода: Выключить" : "💧 Вода: Включить", 
+          callback_data: "toggle_water_notifications" 
+        }],
+        [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+      ]
+    })
+  } catch (error) {
+    console.error('Error showing notifications menu:', error)
+    await sendMessage(chatId, "❌ Ошибка загрузки настроек уведомлений")
+  }
+}
+
+/**
+ * Переключить уведомления
+ */
+async function toggleNotifications(chatId: number, dbUserId: number, type: 'food' | 'water') {
+  try {
+    // Получаем текущие настройки
+    const { data: settings } = await supabase
+      .from('notification_settings')
+      .select('*')
+      .eq('user_id', dbUserId)
+      .single()
+    
+    if (!settings) {
+      await sendMessage(chatId, "❌ Настройки не найдены")
+      return
+    }
+    
+    // Переключаем нужное поле
+    const field = type === 'food' ? 'food_notifications_enabled' : 'water_notifications_enabled'
+    const newValue = !settings[field]
+    
+    await supabase
+      .from('notification_settings')
+      .update({ [field]: newValue })
+      .eq('user_id', dbUserId)
+    
+    const emoji = type === 'food' ? '🍽' : '💧'
+    const name = type === 'food' ? 'уведомления о еде' : 'уведомления о воде'
+    const status = newValue ? 'включены' : 'выключены'
+    
+    await sendMessage(chatId, `${emoji} ${name.charAt(0).toUpperCase() + name.slice(1)} ${status}!`)
+    
+    // Показываем обновленное меню
+    await showNotificationsMenu(chatId, dbUserId)
+  } catch (error) {
+    console.error('Error toggling notifications:', error)
+    await sendMessage(chatId, "❌ Ошибка изменения настроек")
   }
 }
 
