@@ -129,6 +129,27 @@
    }
  }
  /**
+  * Проверка доступа к функциям (есть ли активная подписка)
+  */ async function checkSubscriptionAccess(dbUserId) {
+   try {
+     const subscriptionData = await getSubscriptionInfo(dbUserId);
+     const subscriptionInfo = Array.isArray(subscriptionData) ? subscriptionData[0] : subscriptionData;
+     if (!subscriptionInfo) {
+       return false;
+     }
+     // Проверяем, что подписка активна и не истекла
+     if (subscriptionInfo.is_active && subscriptionInfo.expires_at) {
+       const expiresAt = new Date(subscriptionInfo.expires_at);
+       const now = new Date();
+       return expiresAt > now;
+     }
+     return false;
+   } catch (error) {
+     console.error('Error checking subscription access:', error);
+     return false;
+   }
+ }
+ /**
   * Отправка сообщения в Telegram
   */ async function sendMessage(chatId, text, replyMarkup, parseMode = 'Markdown') {
    const payload = {
@@ -705,7 +726,7 @@
      const subscriptionInfo = Array.isArray(subscriptionData) ? subscriptionData[0] : subscriptionData;
      // Если подписка истекла и это не unlimited
      if (subscriptionInfo && subscriptionInfo.needs_payment && !subscriptionInfo.is_unlimited) {
-       const blockMessage = `⏰ **Пробный период истек**\n\n` + `😔 К сожалению, твой 7-дневный пробный период подошел к концу.\n\n` + `💎 **Продолжи пользоваться C.I.D.** — выбери подходящий тариф:\n\n` + `⚡ **1 месяц** — 199₽ (Попробовать)\n` + `🔥 **3 месяца** — 499₽ (Популярный)\n` + `💎 **1 год** — 1990₽ (Выгодно!)\n\n` + `🔒 Безопасная оплата через T-Bank\n` + `✨ Подписка активируется моментально`;
+       const blockMessage = `⏰ **Пробный период истек**\n\n` + `😔 К сожалению, твой 7-дневный пробный период подошел к концу.\n\n` + `💎 **Продолжи пользоваться C.I.D.** — выбери подходящий тариф:\n\n` + `⚡ **1 месяц** — 129₽ (Попробовать)\n` + `🔥 **6 месяцев** — 649₽ (Популярный)\n` + `💎 **1 год** — 1099₽ (Выгодно!)\n\n` + `🔒 Безопасная оплата через T-Bank\n` + `✨ Подписка активируется моментально`;
        await sendMessage(chatId, blockMessage, {
          inline_keyboard: [
            [
@@ -798,13 +819,13 @@
      const subscriptionInfo = Array.isArray(subscriptionData) ? subscriptionData[0] : subscriptionData;
      if (subscriptionInfo && subscriptionInfo.is_trial) {
        const daysLeft = Math.ceil((new Date(subscriptionInfo.expires_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
-       const trialMessage = `🎁 **Пробный период активирован!**\n\n` + `⏰ **${daysLeft} ${daysLeft === 1 ? 'день' : daysLeft < 5 ? 'дня' : 'дней'}** бесплатного доступа\n\n` + `💡 **Сейчас ничего платить не нужно!**\n` + `Никаких данных карт, никаких автоплатежей.\n\n` + `✨ Пользуйся **всеми функциями** бота совершенно бесплатно.\n\n` + `📅 После ${daysLeft} ${daysLeft === 1 ? 'дня' : daysLeft < 5 ? 'дней' : 'дней'} сможешь продолжить за:\n` + `• 1 месяц — 199₽\n` + `• 3 месяца — 499₽ (выгодно!)\n` + `• 1 год — 1990₽ (супер выгодно!)\n\n` + `🚀 Начинай прямо сейчас!`;
+       const trialMessage = `🎁 **Пробный период активирован!**\n\n` + `⏰ **${daysLeft} ${daysLeft === 1 ? 'день' : daysLeft < 5 ? 'дня' : 'дней'}** бесплатного доступа\n\n` + `💡 **Сейчас ничего платить не нужно!**\n` + `Никаких данных карт, никаких автоплатежей.\n\n` + `✨ Пользуйся **всеми функциями** бота совершенно бесплатно.\n\n` + `📅 После ${daysLeft} ${daysLeft === 1 ? 'дня' : daysLeft < 5 ? 'дней' : 'дней'} сможешь продолжить за:\n` + `• 1 месяц — 129₽\n` + `• 6 месяцев — 649₽ (выгодно!)\n` + `• 1 год — 1099₽ (супер выгодно!)\n\n` + `🚀 Начинай прямо сейчас!`;
        await sendMessage(chatId, trialMessage, {
          inline_keyboard: [
            [
              {
                text: "🚀 Начать пользоваться",
-               callback_data: "main_menu"
+               callback_data: "start_onboarding"
              }
            ]
          ]
@@ -907,8 +928,9 @@
        height: 'рост',
        age: 'возраст'
      };
+     const paramName = paramNames[param] || param;
      await setUserState(userId, `editing_${param}`, {});
-     await sendMessage(chatId, `📝 Введи новое значение для ${paramNames[param]}:`);
+     await sendMessage(chatId, `📝 Введи новое значение для ${paramName}:`);
    } else if (data === 'log_food') {
      await setUserState(userId, 'logging_food', {});
      await sendMessage(chatId, `🍽 **Запись приема пищи**
@@ -954,6 +976,65 @@
      });
    } else if (data === 'diary') {
      await showDiary(chatId, user.id);
+   } else if (data === 'start_onboarding') {
+     await startOnboarding(chatId, userId);
+   } else if (data === 'onboarding_step_2') {
+     await onboardingStep2(chatId, userId);
+   } else if (data === 'onboarding_step_3') {
+     await onboardingStep3(chatId, userId);
+   } else if (data === 'onboarding_step_4') {
+     await onboardingStep4(chatId, userId);
+   } else if (data === 'onboarding_step_5') {
+     await onboardingStep5(chatId, userId);
+   } else if (data === 'onboarding_step_6') {
+     await onboardingStep6(chatId, userId);
+   } else if (data.startsWith('confirm_photo_')) {
+     const stateData = await getUserState(userId);
+     if (stateData?.state === 'photo_analysis_pending' && stateData.data?.analysis) {
+       const analysis = stateData.data.analysis;
+       // Формируем описание для записи
+       const foodDescription = analysis.items.map((item)=>`${item.name} ${item.weight}г`).join(', ');
+       // Записываем в базу
+       const { error } = await supabase.from('food_logs').insert({
+         user_id: user.id,
+         description: foodDescription,
+         calories: analysis.total.calories,
+         protein: analysis.total.protein,
+         fats: analysis.total.fats,
+         carbs: analysis.total.carbs,
+         created_at: new Date().toISOString()
+       });
+       if (error) {
+         console.error('Error saving photo meal:', error);
+         await sendMessage(chatId, "❌ Ошибка сохранения. Попробуй еще раз.");
+         return;
+       }
+       await clearUserState(userId);
+       await sendMessage(chatId, `✅ **Прием пищи записан!**\n\n` + `📝 ${foodDescription}\n\n` + `🔥 Калории: ${analysis.total.calories} ккал\n` + `🥩 Белки: ${analysis.total.protein}г\n` + `🧈 Жиры: ${analysis.total.fats}г\n` + `🍞 Углеводы: ${analysis.total.carbs}г\n\n` + `⚠️ Помни: это примерная оценка!`, {
+         inline_keyboard: [
+           [
+             {
+               text: "📊 Дневник",
+               callback_data: "diary"
+             }
+           ],
+           [
+             {
+               text: "🍽️ Записать еще",
+               callback_data: "log_food"
+             }
+           ],
+           [
+             {
+               text: "🏠 Главное меню",
+               callback_data: "main_menu"
+             }
+           ]
+         ]
+       });
+     } else {
+       await sendMessage(chatId, "❌ Данные анализа не найдены. Отправь фото заново.");
+     }
    } else if (data === 'main_menu') {
      await clearUserState(userId) // Очищаем любое активное состояние
      ;
@@ -964,6 +1045,23 @@
      await toggleNotifications(chatId, user.id, 'food');
    } else if (data === 'toggle_water_notifications') {
      await toggleNotifications(chatId, user.id, 'water');
+   } else if (data === 'support_project') {
+     await showDonationOptions(chatId, userId);
+   } else if (data.startsWith('donate_')) {
+     const amount = parseInt(data.split('_')[1]);
+     await createDonationPayment(chatId, user.id, amount);
+   } else if (data === 'donate_custom') {
+     await setUserState(userId, 'entering_donation_amount', {});
+     await sendMessage(chatId, `💝 **Поддержать проект**\n\n` + `Введи сумму, которую хочешь поддержать проект (от 50₽ до 10000₽):\n\n` + `Например: 500`, {
+       inline_keyboard: [
+         [
+           {
+             text: "❌ Отмена",
+             callback_data: "support_project"
+           }
+         ]
+       ]
+     });
    } else if (data === 'buy_subscription') {
      // Получаем только платные планы (monthly, quarterly, yearly)
      const { data: plans } = await supabase.from('subscription_plans').select('*').in('name', [
@@ -995,7 +1093,7 @@
          durationText = '1 месяц';
          description = 'Попробовать';
        } else if (plan.name === 'quarterly') {
-         durationText = '3 месяца';
+         durationText = '6 месяцев';
          description = 'Популярный';
        } else if (plan.name === 'yearly') {
          durationText = '1 год';
@@ -1299,7 +1397,7 @@
      const subscriptionInfo = Array.isArray(subscriptionData) ? subscriptionData[0] : subscriptionData;
      // Если подписка истекла и это не unlimited
      if (subscriptionInfo && subscriptionInfo.needs_payment && !subscriptionInfo.is_unlimited) {
-       const blockMessage = `⏰ **Пробный период истек**\n\n` + `😔 К сожалению, твой 7-дневный пробный период подошел к концу.\n\n` + `💎 **Продолжи пользоваться C.I.D.** — выбери подходящий тариф:\n\n` + `⚡ **1 месяц** — 199₽ (Попробовать)\n` + `🔥 **3 месяца** — 499₽ (Популярный)\n` + `💎 **1 год** — 1990₽ (Выгодно!)\n\n` + `🔒 Безопасная оплата через T-Bank\n` + `✨ Подписка активируется моментально`;
+       const blockMessage = `⏰ **Пробный период истек**\n\n` + `😔 К сожалению, твой 7-дневный пробный период подошел к концу.\n\n` + `💎 **Продолжи пользоваться C.I.D.** — выбери подходящий тариф:\n\n` + `⚡ **1 месяц** — 129₽ (Попробовать)\n` + `🔥 **6 месяцев** — 649₽ (Популярный)\n` + `💎 **1 год** — 1099₽ (Выгодно!)\n\n` + `🔒 Безопасная оплата через T-Bank\n` + `✨ Подписка активируется моментально`;
        await sendMessage(message.chat.id, blockMessage, {
          inline_keyboard: [
            [
@@ -1618,6 +1716,15 @@
          ]
        ]
      });
+   } else if (stateData.state === 'entering_donation_amount') {
+     if (!message.text) return;
+     const amount = parseInt(message.text.replace(/\D/g, ''));
+     if (isNaN(amount) || amount < 50 || amount > 10000) {
+       await sendMessage(message.chat.id, "❌ Пожалуйста, укажи сумму от 50₽ до 10000₽");
+       return;
+     }
+     await clearUserState(userId);
+     await createDonationPayment(message.chat.id, user.id, amount);
    } else if (stateData.state === 'entering_manual_nutrition') {
      if (!message.text) return;
      const values = message.text.trim().split(/\s+/);
@@ -2285,6 +2392,194 @@
    }
  }
  /**
+  * Функция для получения URL фото
+  */ async function getPhotoUrl(fileId) {
+   try {
+     const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`);
+     const data = await response.json();
+     if (data.ok && data.result.file_path) {
+       return `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${data.result.file_path}`;
+     }
+     return null;
+   } catch (error) {
+     console.error('Error getting photo URL:', error);
+     return null;
+   }
+ }
+ /**
+  * Анализ фото с едой через GPT-4 Vision
+  */ async function analyzeFoodPhoto(photoUrl, caption) {
+   const prompt = `Проанализируй это фото еды и определи:
+ 1. Какие продукты/блюда на фото
+ 2. Примерный вес/объем каждого продукта в граммах
+ 3. Калории, белки, жиры, углеводы для каждого продукта
+ 
+ ${caption ? `Дополнительная информация от пользователя: ${caption}` : ''}
+ 
+ ВАЖНО: Это примерная оценка на основе визуального анализа. Точность может быть невысокой.
+ 
+ Ответь в формате JSON:
+ {
+   "items": [
+     {
+       "name": "название продукта",
+       "weight": число_в_граммах,
+       "calories": число,
+       "protein": число,
+       "fats": число,
+       "carbs": число
+     }
+   ],
+   "total": {
+     "calories": число,
+     "protein": число,
+     "fats": число,
+     "carbs": число
+   },
+   "confidence": "low/medium/high",
+   "notes": "дополнительные заметки"
+ }`;
+   const response = await fetch('https://api.openai.com/v1/chat/completions', {
+     method: 'POST',
+     headers: {
+       'Content-Type': 'application/json',
+       'Authorization': `Bearer ${OPENAI_API_KEY}`
+     },
+     body: JSON.stringify({
+       model: 'gpt-4o',
+       messages: [
+         {
+           role: 'user',
+           content: [
+             {
+               type: 'text',
+               text: prompt
+             },
+             {
+               type: 'image_url',
+               image_url: {
+                 url: photoUrl
+               }
+             }
+           ]
+         }
+       ],
+       max_tokens: 1000,
+       temperature: 0.3
+     })
+   });
+   const data = await response.json();
+   let content = data.choices[0].message.content;
+   // Очищаем от markdown блоков (```json ... ```)
+   content = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+   try {
+     return JSON.parse(content);
+   } catch (error) {
+     console.error('Error parsing GPT response:', error);
+     console.error('Content:', content);
+     throw new Error('Не удалось распознать содержимое фото. Попробуй еще раз.');
+   }
+ }
+ /**
+  * Обработка фото с едой
+  */ async function handlePhotoMessage(message) {
+   const chatId = message.chat.id;
+   const userId = message.from.id;
+   try {
+     // Получаем пользователя из БД
+     const { data: user } = await supabase.from('users').select('id').eq('telegram_id', userId).single();
+     if (!user) {
+       await sendMessage(chatId, "❌ Пользователь не найден. Используй /start");
+       return;
+     }
+     // Проверяем подписку
+     const hasAccess = await checkSubscriptionAccess(user.id);
+     if (!hasAccess) {
+       await sendMessage(chatId, "⚠️ **Распознавание по фото доступно только с подпиской**\n\n" + "Оформи подписку, чтобы использовать эту функцию!", {
+         inline_keyboard: [
+           [
+             {
+               text: "💎 Оформить подписку",
+               callback_data: "buy_subscription"
+             }
+           ],
+           [
+             {
+               text: "🏠 Главное меню",
+               callback_data: "main_menu"
+             }
+           ]
+         ]
+       });
+       return;
+     }
+     await sendMessage(chatId, "📸 Анализирую фото...\n\n⚠️ **Внимание:** Это примерная оценка на основе визуального анализа. Точность может быть невысокой!");
+     // Получаем самое большое фото (последнее в массиве)
+     const photo = message.photo[message.photo.length - 1];
+     const photoUrl = await getPhotoUrl(photo.file_id);
+     if (!photoUrl) {
+       await sendMessage(chatId, "❌ Не удалось получить фото. Попробуй еще раз.");
+       return;
+     }
+     // Анализируем фото
+     const analysis = await analyzeFoodPhoto(photoUrl, message.caption);
+     // Формируем текст с результатами
+     let resultText = `📊 **Результаты анализа фото:**\n\n`;
+     // Добавляем дисклеймер о точности
+     const confidenceEmoji = {
+       'low': '🟡',
+       'medium': '🟠',
+       'high': '🟢'
+     };
+     resultText += `${confidenceEmoji[analysis.confidence] || '🟡'} Уверенность: ${analysis.confidence === 'low' ? 'низкая' : analysis.confidence === 'medium' ? 'средняя' : 'высокая'}\n\n`;
+     // Список продуктов
+     resultText += `🍽️ **Обнаружено:**\n`;
+     for (const item of analysis.items){
+       resultText += `• ${item.name} (~${item.weight}г)\n`;
+       resultText += `  К: ${item.calories} | Б: ${item.protein}г | Ж: ${item.fats}г | У: ${item.carbs}г\n`;
+     }
+     resultText += `\n📈 **Итого:**\n`;
+     resultText += `🔥 Калории: ${analysis.total.calories} ккал\n`;
+     resultText += `🥩 Белки: ${analysis.total.protein}г\n`;
+     resultText += `🧈 Жиры: ${analysis.total.fats}г\n`;
+     resultText += `🍞 Углеводы: ${analysis.total.carbs}г\n`;
+     if (analysis.notes) {
+       resultText += `\n💡 ${analysis.notes}\n`;
+     }
+     resultText += `\n⚠️ **Это примерная оценка!** Для точности рекомендуем взвешивать продукты.`;
+     await sendMessage(chatId, resultText, {
+       inline_keyboard: [
+         [
+           {
+             text: "✅ Записать",
+             callback_data: `confirm_photo_${user.id}`
+           }
+         ],
+         [
+           {
+             text: "✏️ Изменить",
+             callback_data: "edit_photo_meal"
+           }
+         ],
+         [
+           {
+             text: "❌ Отмена",
+             callback_data: "main_menu"
+           }
+         ]
+       ]
+     });
+     // Сохраняем данные анализа в состоянии для подтверждения
+     await setUserState(userId, 'photo_analysis_pending', {
+       analysis: analysis,
+       photo_url: photoUrl
+     });
+   } catch (error) {
+     console.error('Error handling photo message:', error);
+     await sendMessage(chatId, "❌ Ошибка анализа фото. Попробуй еще раз или опиши еду текстом.");
+   }
+ }
+ /**
   * Показать меню уведомлений
   */ async function showNotificationsMenu(chatId, dbUserId) {
    try {
@@ -2431,7 +2726,7 @@
        [
          {
            text: "💝 Поддержать проект",
-           callback_data: "buy_subscription"
+           callback_data: "support_project"
          }
        ],
        [
@@ -2485,9 +2780,9 @@
        } else if (subscriptionInfo.needs_payment) {
          profileText += `🔒 **Истекла**\n\n`;
          profileText += `💳 Оформи подписку для продолжения:\n`;
-         profileText += `📦 1 месяц - 199₽\n`;
-         profileText += `📦 3 месяца - 499₽\n`;
-         profileText += `📦 1 год - 1990₽\n\n`;
+         profileText += `📦 1 месяц - 129₽\n`;
+         profileText += `📦 6 месяцев - 649₽\n`;
+         profileText += `📦 1 год - 1099₽\n\n`;
        } else {
          const daysLeft = Math.ceil((new Date(subscriptionInfo.expires_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
          profileText += `✅ **Активна:** ${subscriptionInfo.plan_name}\n`;
@@ -2580,7 +2875,7 @@
          month: 'long',
          year: 'numeric'
        });
-       statusText = `🎁 **Пробный период**\n\n` + `⏰ **Осталось:** ${daysLeft} ${daysLeft === 1 ? 'день' : daysLeft < 5 ? 'дня' : 'дней'}\n` + `📅 **Активен до:** ${formattedDate}\n\n` + `💡 Сейчас ты пользуешься всеми функциями бесплатно!\n\n` + `После окончания пробного периода можешь продлить подписку:\n` + `• 1 месяц — 199₽\n` + `• 3 месяца — 499₽ (выгодно!)\n` + `• 1 год — 1990₽ (супер выгодно!)`;
+       statusText = `🎁 **Пробный период**\n\n` + `⏰ **Осталось:** ${daysLeft} ${daysLeft === 1 ? 'день' : daysLeft < 5 ? 'дня' : 'дней'}\n` + `📅 **Активен до:** ${formattedDate}\n\n` + `💡 Сейчас ты пользуешься всеми функциями бесплатно!\n\n` + `После окончания пробного периода можешь продлить подписку:\n` + `• 1 месяц — 129₽\n` + `• 6 месяцев — 649₽ (выгодно!)\n` + `• 1 год — 1099₽ (супер выгодно!)`;
        statusEmoji = '🎁';
        keyboard = [
          [
@@ -2598,7 +2893,7 @@
        ];
      } else if (subscriptionInfo.needs_payment) {
        // Подписка истекла
-       statusText = `⏰ **Подписка истекла**\n\n` + `😔 Твоя подписка закончилась.\n\n` + `Продли подписку, чтобы продолжить пользоваться всеми функциями бота:\n` + `• 1 месяц — 199₽\n` + `• 3 месяца — 499₽ (выгодно!)\n` + `• 1 год — 1990₽ (супер выгодно!)`;
+       statusText = `⏰ **Подписка истекла**\n\n` + `😔 Твоя подписка закончилась.\n\n` + `Продли подписку, чтобы продолжить пользоваться всеми функциями бота:\n` + `• 1 месяц — 129₽\n` + `• 6 месяцев — 649₽ (выгодно!)\n` + `• 1 год — 1099₽ (супер выгодно!)`;
        statusEmoji = '⏰';
        keyboard = [
          [
@@ -2640,7 +2935,7 @@
          [
            {
              text: "💝 Поддержать проект",
-             callback_data: "buy_subscription"
+             callback_data: "support_project"
            }
          ],
          [
@@ -2940,6 +3235,252 @@
    }
  }
  /**
+  * Онбординг для новых пользователей
+  */ async function startOnboarding(chatId, userId) {
+   try {
+     // Шаг 1: Приветствие и обзор
+     await sendMessage(chatId, `🎉 **Добро пожаловать в C.I.D.!**\n\n` + `Я твой персональный AI-диетолог. Давай разберемся, как я работаю!\n\n` + `📱 **Что я умею:**\n` + `• Записывать твои приемы пищи\n` + `• Анализировать КБЖУ\n` + `• Давать советы по питанию\n` + `• Составлять меню и рецепты\n\n` + `🚀 **Начнем с основ!**`, {
+       inline_keyboard: [
+         [
+           {
+             text: "➡️ Далее",
+             callback_data: "onboarding_step_2"
+           }
+         ],
+         [
+           {
+             text: "⏭️ Пропустить",
+             callback_data: "main_menu"
+           }
+         ]
+       ]
+     });
+   } catch (error) {
+     console.error('Error in onboarding:', error);
+     await sendMessage(chatId, "❌ Ошибка. Переходим в главное меню.", getMainKeyboard());
+   }
+ }
+ /**
+  * Шаг 2 онбординга: Главное меню
+  */ async function onboardingStep2(chatId, userId) {
+   await sendMessage(chatId, `🏠 **Главное меню**\n\n` + `Это твоя база! Отсюда ты можешь:\n\n` + `📝 **Записать прием пищи** - просто напиши что съел\n` + `📊 **Дневник** - посмотреть статистику за день\n` + `⚙️ **Настройки** - изменить профиль и уведомления\n` + `👤 **Профиль** - посмотреть свой план КБЖУ\n\n` + `💡 **Совет:** Чаще всего ты будешь использовать запись еды!`, {
+     inline_keyboard: [
+       [
+         {
+           text: "➡️ Далее",
+           callback_data: "onboarding_step_3"
+         }
+       ],
+       [
+         {
+           text: "⏭️ Пропустить",
+           callback_data: "main_menu"
+         }
+       ]
+     ]
+   });
+ }
+ /**
+  * Шаг 3 онбординга: Запись еды
+  */ async function onboardingStep3(chatId, userId) {
+   await sendMessage(chatId, `🍽️ **Как записать прием пищи**\n\n` + `**Способ 1:** Просто напиши в чат\n` + `• "банан 150г, овсянка 60г"\n` + `• "съел курицу с рисом"\n` + `• "выпил кофе с молоком"\n\n` + `**Способ 2:** Голосовое сообщение\n` + `• Нажми микрофон и расскажи что съел\n` + `• Я пойму и запишу!\n\n` + `🤖 **Я автоматически:**\n` + `• Подсчитаю калории и КБЖУ\n` + `• Покажу детализацию по продуктам\n` + `• Дам совет по питанию`, {
+     inline_keyboard: [
+       [
+         {
+           text: "➡️ Далее",
+           callback_data: "onboarding_step_4"
+         }
+       ],
+       [
+         {
+           text: "⏭️ Пропустить",
+           callback_data: "main_menu"
+         }
+       ]
+     ]
+   });
+ }
+ /**
+  * Шаг 4 онбординга: Редактирование
+  */ async function onboardingStep4(chatId, userId) {
+   await sendMessage(chatId, `✏️ **Редактирование записей**\n\n` + `После записи еды ты увидишь кнопки:\n\n` + `✏️ **Изменить** - исправить описание или вес\n` + `🗑️ **Удалить** - убрать запись\n` + `📊 **Статистика** - посмотреть дневник\n` + `🍽️ **Записать еще** - добавить еще один прием\n\n` + `💡 **Важно:** Всегда можно исправить ошибки!`, {
+     inline_keyboard: [
+       [
+         {
+           text: "➡️ Далее",
+           callback_data: "onboarding_step_5"
+         }
+       ],
+       [
+         {
+           text: "⏭️ Пропустить",
+           callback_data: "main_menu"
+         }
+       ]
+     ]
+   });
+ }
+ /**
+  * Шаг 5 онбординга: Настройки
+  */ async function onboardingStep5(chatId, userId) {
+   await sendMessage(chatId, `⚙️ **Настройки и профиль**\n\n` + `**В настройках ты можешь:**\n` + `• Изменить вес, рост, возраст\n` + `• Пересчитать план КБЖУ\n` + `• Настроить уведомления\n\n` + `**В профиле увидишь:**\n` + `• Свой план КБЖУ\n` + `• Статистику за день\n` + `• Информацию о подписке\n\n` + `🎯 **Цель:** Следуй своему плану КБЖУ для достижения цели!`, {
+     inline_keyboard: [
+       [
+         {
+           text: "➡️ Далее",
+           callback_data: "onboarding_step_6"
+         }
+       ],
+       [
+         {
+           text: "⏭️ Пропустить",
+           callback_data: "main_menu"
+         }
+       ]
+     ]
+   });
+ }
+ /**
+  * Шаг 6 онбординга: Советы и завершение
+  */ async function onboardingStep6(chatId, userId) {
+   await sendMessage(chatId, `💡 **Полезные советы**\n\n` + `**Для лучших результатов:**\n` + `• Записывай еду сразу после приема\n` + `• Указывай вес продуктов (150г, 200мл)\n` + `• Не забывай про воду!\n` + `• Задавай вопросы о питании\n\n` + `**Если что-то непонятно:**\n` + `• Нажми ❓ Помощь в главном меню\n` + `• Просто напиши вопрос в чат\n\n` + `🚀 **Готов начать?**`, {
+     inline_keyboard: [
+       [
+         {
+           text: "🎯 Начать пользоваться!",
+           callback_data: "main_menu"
+         }
+       ]
+     ]
+   });
+ }
+ /**
+  * Показать опции доната
+  */ async function showDonationOptions(chatId, userId) {
+   await sendMessage(chatId, `💝 **Поддержать проект C.I.D.**\n\n` + `Спасибо, что хочешь поддержать развитие бота!\n\n` + `Твой донат поможет:\n` + `• Оплачивать серверы и AI\n` + `• Добавлять новые функции\n` + `• Улучшать качество сервиса\n\n` + `💰 **Выбери сумму или укажи свою:**`, {
+     inline_keyboard: [
+       [
+         {
+           text: "☕ 100₽",
+           callback_data: "donate_100"
+         },
+         {
+           text: "🍕 300₽",
+           callback_data: "donate_300"
+         }
+       ],
+       [
+         {
+           text: "🎁 500₽",
+           callback_data: "donate_500"
+         },
+         {
+           text: "💎 1000₽",
+           callback_data: "donate_1000"
+         }
+       ],
+       [
+         {
+           text: "✏️ Своя сумма",
+           callback_data: "donate_custom"
+         }
+       ],
+       [
+         {
+           text: "❌ Отмена",
+           callback_data: "main_menu"
+         }
+       ]
+     ]
+   });
+ }
+ /**
+  * Создать платеж для доната
+  */ async function createDonationPayment(chatId, dbUserId, amount) {
+   try {
+     console.log('createDonationPayment called with:', {
+       chatId,
+       dbUserId,
+       amount,
+       dbUserIdType: typeof dbUserId
+     });
+     await sendMessage(chatId, "⏳ Создаю счет на оплату...");
+     // Генерируем уникальный order_id
+     const orderId = `donation_${dbUserId}_${Date.now()}`;
+     // Создаем платежное намерение в базе данных
+     const { data: paymentIntent, error } = await supabase.from('payment_intents').insert({
+       user_id: dbUserId,
+       plan_id: null,
+       order_id: orderId,
+       amount_rub: amount,
+       amount_kopeks: amount * 100,
+       description: `Поддержка проекта C.I.D. - ${amount}₽`,
+       status: 'NEW',
+       is_donation: true // Флаг доната
+     }).select().single();
+     if (error) {
+       console.error('Error creating donation payment intent:', error);
+       await sendMessage(chatId, "❌ Ошибка создания платежа. Попробуй позже.");
+       return;
+     }
+     // Вызываем функцию создания платежа через T-Bank
+     const SUPABASE_URL = Deno.env.get('SUPABASE_URL');
+     const requestData = {
+       userId: Number(dbUserId),
+       amount_rub: amount,
+       order_id: orderId,
+       description: `Поддержка проекта C.I.D. - ${amount}₽`,
+       is_donation: true
+     };
+     console.log('Sending donation request:', JSON.stringify(requestData, null, 2));
+     const response = await fetch(`${SUPABASE_URL}/functions/v1/tbank-payment`, {
+       method: 'POST',
+       headers: {
+         'Content-Type': 'application/json',
+         'Authorization': `Bearer ${Deno.env.get('SUPABASE_ANON_KEY')}`
+       },
+       body: JSON.stringify(requestData)
+     });
+     if (!response.ok) {
+       const errorText = await response.text();
+       console.error('T-Bank payment HTTP error:', response.status, errorText);
+       await sendMessage(chatId, "❌ Ошибка создания платежа. Попробуй позже.");
+       return;
+     }
+     const paymentData = await response.json();
+     if (paymentData.error) {
+       console.error('T-Bank payment error:', paymentData.error);
+       await sendMessage(chatId, "❌ Ошибка создания платежа. Попробуй позже.");
+       return;
+     }
+     if (!paymentData.payment_url) {
+       console.error('No payment URL in response:', paymentData);
+       await sendMessage(chatId, "❌ Ошибка создания платежа. Попробуй позже.");
+       return;
+     }
+     // Отправляем ссылку на оплату
+     await sendMessage(chatId, `💝 **Поддержка проекта - ${amount}₽**\n\n` + `Спасибо за желание поддержать C.I.D.!\n\n` + `🔒 **Безопасная оплата через T-Bank**\n` + `✨ После оплаты ты получишь уведомление\n\n` + `👇 Нажми кнопку ниже для оплаты:`, {
+       inline_keyboard: [
+         [
+           {
+             text: "💳 Оплатить",
+             url: paymentData.payment_url
+           }
+         ],
+         [
+           {
+             text: "🏠 Главное меню",
+             callback_data: "main_menu"
+           }
+         ]
+       ]
+     });
+   } catch (error) {
+     console.error('Error creating donation payment:', error);
+     await sendMessage(chatId, "❌ Ошибка создания платежа. Попробуй позже.");
+   }
+ }
+ /**
   * Главная функция обработки обновлений
   */ async function handleUpdate(update) {
    try {
@@ -2951,6 +3492,9 @@
          if (command === 'start') {
            await handleStartCommand(message);
          }
+       } else if (message.photo) {
+         // Обработка фото
+         await handlePhotoMessage(message);
        } else if (message.voice) {
          // Обработка голосовых сообщений
          await handleVoiceMessage(message);

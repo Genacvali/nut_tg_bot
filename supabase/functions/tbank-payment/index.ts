@@ -117,10 +117,13 @@ serve(async (req) => {
 
     if (is_donation) {
       // Для доната используем переданные данные
+      if (!amount_rub || amount_rub < 50) {
+        throw new Error("Invalid donation amount");
+      }
       amountRub = amount_rub;
       paymentDescription = description || `Поддержка проекта C.I.D. - ${amount_rub}₽`;
-      finalOrderId = order_id;
-      console.log(`Donation: ${amountRub}₽`);
+      finalOrderId = order_id || `donation_${userId}_${Date.now()}`;
+      console.log(`Donation: ${amountRub}₽, orderId: ${finalOrderId}`);
     } else {
       // Получаем информацию о плане
       const { data: planData, error: planError } = await supabase
@@ -238,7 +241,7 @@ serve(async (req) => {
           response_data: tbankData,
           updated_at: new Date().toISOString(),
         })
-        .eq("order_id", orderId);
+        .eq("order_id", finalOrderId);
 
       throw new Error(
         `T-Bank error: ${tbankData.Message || tbankData.Details || "Unknown error"}`
@@ -253,11 +256,11 @@ serve(async (req) => {
         payment_url: tbankData.PaymentURL,
         success_url: successUrl,
         fail_url: failUrl,
-        request_data: requestBody,
+        request_data: tbankRequestBody,
         response_data: tbankData,
         updated_at: new Date().toISOString(),
       })
-      .eq("order_id", orderId);
+      .eq("order_id", finalOrderId);
 
     if (updateError) {
       console.error("Error updating payment intent:", updateError);
@@ -267,10 +270,10 @@ serve(async (req) => {
     return new Response(
       JSON.stringify({
         success: true,
-        paymentUrl: tbankData.PaymentURL,
+        payment_url: tbankData.PaymentURL,
         paymentId: tbankData.PaymentId,
-        orderId: orderId,
-        amount: plan.price_rub,
+        orderId: finalOrderId,
+        amount: amountRub,
       }),
       {
         headers: {
