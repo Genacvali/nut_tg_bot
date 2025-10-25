@@ -125,8 +125,9 @@ serve(async (req) => {
     const amountKopeks = Math.round(plan.price_rub * 100);
 
     // URLs для редиректа
-    const successUrl = `https://t.me/${botUsername}?start=payment_success`;
-    const failUrl = `https://t.me/${botUsername}?start=payment_failed`;
+    // Используем официальные страницы T-Bank с автоматическим редиректом в бот
+    const successUrl = `https://securepay.tinkoff.ru/html/payForm/success.html`;
+    const failUrl = `https://securepay.tinkoff.ru/html/payForm/fail.html`;
 
     // Чек для 54-ФЗ (обязательно!)
     const receipt = {
@@ -145,6 +146,12 @@ serve(async (req) => {
       ]
     };
 
+    // URL для webhook уведомлений от T-Bank
+    const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
+    const notificationUrl = `${SUPABASE_URL}/functions/v1/tbank-webhook`;
+    
+    console.log(`Notification URL: ${notificationUrl}`);
+
     // Параметры запроса к T-Bank
     const initParams: Record<string, any> = {
       TerminalKey: terminalKey,
@@ -152,6 +159,7 @@ serve(async (req) => {
       OrderId: orderId,
       Description: `Подписка C.I.D.: ${plan.name}`,
       Receipt: receipt, // Добавляем чек!
+      NotificationURL: notificationUrl, // URL для webhook уведомлений
       SuccessURL: successUrl,
       FailURL: failUrl,
       Language: "ru",

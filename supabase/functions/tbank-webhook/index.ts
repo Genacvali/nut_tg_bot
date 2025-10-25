@@ -173,7 +173,7 @@ serve(async (req) => {
 
     console.log(`✅ Payment status updated: ${Status}`);
 
-    // Получаем информацию о платеже
+    // Получаем информацию о платеже с telegram_id пользователя
     const { data: payment, error: paymentError } = await supabase
       .from("payment_intents")
       .select(`
@@ -181,6 +181,9 @@ serve(async (req) => {
         subscription_plans (
           name,
           duration_days
+        ),
+        users!inner (
+          telegram_id
         )
       `)
       .eq("order_id", OrderId)
@@ -190,20 +193,41 @@ serve(async (req) => {
       console.error("Payment not found:", OrderId);
       throw new Error("Payment not found");
     }
+    
+    // Получаем telegram_id из связанной таблицы users
+    const telegramChatId = payment.users?.telegram_id;
+    if (!telegramChatId) {
+      console.error("Telegram chat ID not found for user:", payment.user_id);
+    }
 
     // Отправляем уведомление пользователю в зависимости от статуса
     if (botToken) {
       let notificationMessage = "";
-      let keyboard = null;
+      let keyboard: any = null;
 
       switch (Status) {
         case "CONFIRMED":
-          // Платеж успешен!
+          // Платеж успешен! Получаем информацию о новой подписке
+          const { data: subscriptionInfo } = await supabase.rpc('get_subscription_info', {
+            p_user_id: payment.user_id
+          })
+          
+          let expiresText = ''
+          if (subscriptionInfo && subscriptionInfo.expires_at) {
+            const expiresDate = new Date(subscriptionInfo.expires_at)
+            const formattedDate = expiresDate.toLocaleDateString('ru-RU', { 
+              day: 'numeric', 
+              month: 'long', 
+              year: 'numeric' 
+            })
+            expiresText = `\n📅 **Активна до:** ${formattedDate}`
+          }
+          
           notificationMessage =
-            `🎉 **Оплата прошла успешно!**\n\n` +
-            `📦 Подписка: ${payment.subscription_plans.name}\n` +
-            `💰 Сумма: ${payment.amount_rub}₽\n` +
-            `⏰ Срок: ${payment.subscription_plans.duration_days} дней\n\n` +
+            `🎉 **Спасибо за поддержку!**\n\n` +
+            `💝 Оплата прошла успешно!\n` +
+            `📦 Подписка активирована\n` +
+            `💰 Сумма: ${payment.amount_rub}₽${expiresText}\n\n` +
             `✅ Все функции бота разблокированы!\n` +
             `Приятного пользования! 🚀`;
           
@@ -241,14 +265,14 @@ serve(async (req) => {
           console.log(`Webhook status ${Status} - no notification sent`);
       }
 
-      if (notificationMessage) {
+      if (notificationMessage && telegramChatId) {
         await sendTelegramNotification(
           botToken,
-          payment.user_id,
+          telegramChatId,
           notificationMessage,
           keyboard
         );
-        console.log(`✅ Notification sent to user ${payment.user_id}`);
+        console.log(`✅ Notification sent to Telegram chat ${telegramChatId} (user ${payment.user_id})`);
       }
     }
 
