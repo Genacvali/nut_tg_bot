@@ -19,6 +19,8 @@ interface TelegramMessage {
   chat: TelegramChat
   text?: string
   voice?: TelegramVoice
+  photo?: TelegramPhotoSize[]
+  caption?: string
 }
 
 interface TelegramVoice {
@@ -26,6 +28,14 @@ interface TelegramVoice {
   file_unique_id: string
   duration: number
   mime_type?: string
+  file_size?: number
+}
+
+interface TelegramPhotoSize {
+  file_id: string
+  file_unique_id: string
+  width: number
+  height: number
   file_size?: number
 }
 
@@ -202,6 +212,32 @@ async function getSubscriptionInfo(dbUserId: number): Promise<any> {
   } catch (error) {
     console.error('Exception getting subscription info:', error)
     return null
+  }
+}
+
+/**
+ * Проверка доступа к функциям (есть ли активная подписка)
+ */
+async function checkSubscriptionAccess(dbUserId: number): Promise<boolean> {
+  try {
+    const subscriptionData = await getSubscriptionInfo(dbUserId)
+    const subscriptionInfo = Array.isArray(subscriptionData) ? subscriptionData[0] : subscriptionData
+    
+    if (!subscriptionInfo) {
+      return false
+    }
+    
+    // Проверяем, что подписка активна и не истекла
+    if (subscriptionInfo.is_active && subscriptionInfo.expires_at) {
+      const expiresAt = new Date(subscriptionInfo.expires_at)
+      const now = new Date()
+      return expiresAt > now
+    }
+    
+    return false
+  } catch (error) {
+    console.error('Error checking subscription access:', error)
+    return false
   }
 }
 
@@ -1098,6 +1134,59 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
   }
   else if (data === 'onboarding_step_6') {
     await onboardingStep6(chatId, userId)
+  }
+  
+  // Подтверждение записи из фото
+  else if (data.startsWith('confirm_photo_')) {
+    const stateData = await getUserState(userId)
+    if (stateData?.state === 'photo_analysis_pending' && stateData.data?.analysis) {
+      const analysis = stateData.data.analysis
+      
+      // Формируем описание для записи
+      const foodDescription = analysis.items.map((item: any) => 
+        `${item.name} ${item.weight}г`
+      ).join(', ')
+      
+      // Записываем в базу
+      const { error } = await supabase
+        .from('food_logs')
+        .insert({
+          user_id: user.id,
+          description: foodDescription,
+          calories: analysis.total.calories,
+          protein: analysis.total.protein,
+          fats: analysis.total.fats,
+          carbs: analysis.total.carbs,
+          created_at: new Date().toISOString()
+        })
+      
+      if (error) {
+        console.error('Error saving photo meal:', error)
+        await sendMessage(chatId, "❌ Ошибка сохранения. Попробуй еще раз.")
+        return
+      }
+      
+      await clearUserState(userId)
+      await sendMessage(
+        chatId,
+        `✅ **Прием пищи записан!**\n\n` +
+        `📝 ${foodDescription}\n\n` +
+        `🔥 Калории: ${analysis.total.calories} ккал\n` +
+        `🥩 Белки: ${analysis.total.protein}г\n` +
+        `🧈 Жиры: ${analysis.total.fats}г\n` +
+        `🍞 Углеводы: ${analysis.total.carbs}г\n\n` +
+        `⚠️ Помни: это примерная оценка!`,
+        {
+          inline_keyboard: [
+            [{ text: "📊 Дневник", callback_data: "diary" }],
+            [{ text: "🍽️ Записать еще", callback_data: "log_food" }],
+            [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+          ]
+        }
+      )
+    } else {
+      await sendMessage(chatId, "❌ Данные анализа не найдены. Отправь фото заново.")
+    }
   }
   
   // Главное меню
@@ -2675,6 +2764,207 @@ async function handleVoiceMessage(message: TelegramMessage) {
 }
 
 /**
+ * Функция для получения URL фото
+ */
+async function getPhotoUrl(fileId: string): Promise<string | null> {
+  try {
+    const response = await fetch(
+      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`
+    )
+    const data = await response.json()
+    
+    if (data.ok && data.result.file_path) {
+      return `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${data.result.file_path}`
+    }
+    return null
+  } catch (error) {
+    console.error('Error getting photo URL:', error)
+    return null
+  }
+}
+
+/**
+ * Анализ фото с едой через GPT-4 Vision
+ */
+async function analyzeFoodPhoto(photoUrl: string, caption?: string): Promise<any> {
+  const prompt = `Проанализируй это фото еды и определи:
+1. Какие продукты/блюда на фото
+2. Примерный вес/объем каждого продукта в граммах
+3. Калории, белки, жиры, углеводы для каждого продукта
+
+${caption ? `Дополнительная информация от пользователя: ${caption}` : ''}
+
+ВАЖНО: Это примерная оценка на основе визуального анализа. Точность может быть невысокой.
+
+Ответь в формате JSON:
+{
+  "items": [
+    {
+      "name": "название продукта",
+      "weight": число_в_граммах,
+      "calories": число,
+      "protein": число,
+      "fats": число,
+      "carbs": число
+    }
+  ],
+  "total": {
+    "calories": число,
+    "protein": число,
+    "fats": число,
+    "carbs": число
+  },
+  "confidence": "low/medium/high",
+  "notes": "дополнительные заметки"
+}`
+
+  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${OPENAI_API_KEY}`
+    },
+    body: JSON.stringify({
+      model: 'gpt-4o',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: prompt
+            },
+            {
+              type: 'image_url',
+              image_url: {
+                url: photoUrl
+              }
+            }
+          ]
+        }
+      ],
+      max_tokens: 1000,
+      temperature: 0.3
+    })
+  })
+  
+  const data = await response.json()
+  let content = data.choices[0].message.content
+  
+  // Очищаем от markdown блоков (```json ... ```)
+  content = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
+  
+  try {
+    return JSON.parse(content)
+  } catch (error) {
+    console.error('Error parsing GPT response:', error)
+    console.error('Content:', content)
+    throw new Error('Не удалось распознать содержимое фото. Попробуй еще раз.')
+  }
+}
+
+/**
+ * Обработка фото с едой
+ */
+async function handlePhotoMessage(message: TelegramMessage) {
+  const chatId = message.chat.id
+  const userId = message.from.id
+  
+  try {
+    // Получаем пользователя из БД
+    const { data: user } = await supabase
+      .from('users')
+      .select('id')
+      .eq('telegram_id', userId)
+      .single()
+    
+    if (!user) {
+      await sendMessage(chatId, "❌ Пользователь не найден. Используй /start")
+      return
+    }
+    
+    // Проверяем подписку
+    const hasAccess = await checkSubscriptionAccess(user.id)
+    if (!hasAccess) {
+      await sendMessage(
+        chatId,
+        "⚠️ **Распознавание по фото доступно только с подпиской**\n\n" +
+        "Оформи подписку, чтобы использовать эту функцию!",
+        {
+          inline_keyboard: [
+            [{ text: "💎 Оформить подписку", callback_data: "buy_subscription" }],
+            [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+          ]
+        }
+      )
+      return
+    }
+    
+    await sendMessage(chatId, "📸 Анализирую фото...\n\n⚠️ **Внимание:** Это примерная оценка на основе визуального анализа. Точность может быть невысокой!")
+    
+    // Получаем самое большое фото (последнее в массиве)
+    const photo = message.photo![message.photo!.length - 1]
+    const photoUrl = await getPhotoUrl(photo.file_id)
+    
+    if (!photoUrl) {
+      await sendMessage(chatId, "❌ Не удалось получить фото. Попробуй еще раз.")
+      return
+    }
+    
+    // Анализируем фото
+    const analysis = await analyzeFoodPhoto(photoUrl, message.caption)
+    
+    // Формируем текст с результатами
+    let resultText = `📊 **Результаты анализа фото:**\n\n`
+    
+    // Добавляем дисклеймер о точности
+    const confidenceEmoji = {
+      'low': '🟡',
+      'medium': '🟠',
+      'high': '🟢'
+    }
+    resultText += `${confidenceEmoji[analysis.confidence] || '🟡'} Уверенность: ${analysis.confidence === 'low' ? 'низкая' : analysis.confidence === 'medium' ? 'средняя' : 'высокая'}\n\n`
+    
+    // Список продуктов
+    resultText += `🍽️ **Обнаружено:**\n`
+    for (const item of analysis.items) {
+      resultText += `• ${item.name} (~${item.weight}г)\n`
+      resultText += `  К: ${item.calories} | Б: ${item.protein}г | Ж: ${item.fats}г | У: ${item.carbs}г\n`
+    }
+    
+    resultText += `\n📈 **Итого:**\n`
+    resultText += `🔥 Калории: ${analysis.total.calories} ккал\n`
+    resultText += `🥩 Белки: ${analysis.total.protein}г\n`
+    resultText += `🧈 Жиры: ${analysis.total.fats}г\n`
+    resultText += `🍞 Углеводы: ${analysis.total.carbs}г\n`
+    
+    if (analysis.notes) {
+      resultText += `\n💡 ${analysis.notes}\n`
+    }
+    
+    resultText += `\n⚠️ **Это примерная оценка!** Для точности рекомендуем взвешивать продукты.`
+    
+    await sendMessage(chatId, resultText, {
+      inline_keyboard: [
+        [{ text: "✅ Записать", callback_data: `confirm_photo_${user.id}` }],
+        [{ text: "✏️ Изменить", callback_data: "edit_photo_meal" }],
+        [{ text: "❌ Отмена", callback_data: "main_menu" }]
+      ]
+    })
+    
+    // Сохраняем данные анализа в состоянии для подтверждения
+    await setUserState(userId, 'photo_analysis_pending', {
+      analysis: analysis,
+      photo_url: photoUrl
+    })
+    
+  } catch (error) {
+    console.error('Error handling photo message:', error)
+    await sendMessage(chatId, "❌ Ошибка анализа фото. Попробуй еще раз или опиши еду текстом.")
+  }
+}
+
+/**
  * Показать меню уведомлений
  */
 async function showNotificationsMenu(chatId: number, dbUserId: number) {
@@ -3603,6 +3893,9 @@ async function handleUpdate(update: TelegramUpdate) {
         if (command === 'start') {
           await handleStartCommand(message)
         }
+      } else if (message.photo) {
+        // Обработка фото
+        await handlePhotoMessage(message)
       } else if (message.voice) {
         // Обработка голосовых сообщений
         await handleVoiceMessage(message)
