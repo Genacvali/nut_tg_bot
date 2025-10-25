@@ -1,18 +1,10 @@
-/**
- * Supabase Edge Function для обработки Telegram Webhook
- * C.I.D. Bot - Care • Insight • Discipline
- */
-
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.3'
-
-// Типы для Telegram API
 interface TelegramUpdate {
   update_id: number
   message?: TelegramMessage
   callback_query?: TelegramCallbackQuery
 }
-
 interface TelegramMessage {
   message_id: number
   from: TelegramUser
@@ -22,7 +14,6 @@ interface TelegramMessage {
   photo?: TelegramPhotoSize[]
   caption?: string
 }
-
 interface TelegramVoice {
   file_id: string
   file_unique_id: string
@@ -30,7 +21,6 @@ interface TelegramVoice {
   mime_type?: string
   file_size?: number
 }
-
 interface TelegramPhotoSize {
   file_id: string
   file_unique_id: string
@@ -38,73 +28,51 @@ interface TelegramPhotoSize {
   height: number
   file_size?: number
 }
-
 interface TelegramCallbackQuery {
   id: string
   from: TelegramUser
   message?: TelegramMessage
   data?: string
 }
-
 interface TelegramUser {
   id: number
   username?: string
   first_name: string
 }
-
 interface TelegramChat {
   id: number
   type: string
 }
-
-// Получаем переменные окружения
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 const TELEGRAM_BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN')!
 const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY')!
-
-// Инициализация Supabase клиента
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-
-// Telegram API базовый URL
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`
-
-// ========================================
-// ОПРЕДЕЛЕНИЕ НАМЕРЕНИЯ ПОЛЬЗОВАТЕЛЯ
-// ========================================
-
-/**
- * Определяет намерение пользователя: это описание еды или вопрос?
- */
 async function detectIntent(text: string): Promise<'food' | 'question'> {
   const lowerText = text.toLowerCase().trim()
   
-  // ВАЖНО: Сначала проверяем СИЛЬНЫЕ индикаторы ЕДЫ
-  // Это приоритет, потому что если есть граммы/продукты - это точно еда
   const strongFoodPatterns = [
-    /\d+\s*(г|грам|мл|кг|шт)/i,  // есть граммы/мл/кг/шт - это точно запись еды!
+    /\d+\s*(г|грам|мл|кг|шт)/i,
     /(съел|поел|выпил|скушал|позавтракал|пообедал|поужинал)/i,
     /(завтрак|обед|ужин|перекус):/i,
   ]
   
   for (const pattern of strongFoodPatterns) {
     if (pattern.test(lowerText)) {
-      console.log('Strong food indicator detected:', pattern)
       return 'food'
     }
   }
   
-  // Явные ВОПРОСИТЕЛЬНЫЕ конструкции (начинается с вопросительного слова)
   const explicitQuestionPatterns = [
     /^(что|как|где|когда|почему|зачем|какой|какая|можно ли|стоит ли)/i,
-    /\?$/,  // заканчивается на вопросительный знак
+    /\?$/,
     /(посовет|подскаж|помог|расскаж|объясн|покаж)/i,
     /(можно съесть|что поесть|что приготовить|посоветуй|порекомендуй|дай рецепт|найди рецепт|покажи меню)/i
   ]
   
   for (const pattern of explicitQuestionPatterns) {
     if (pattern.test(lowerText)) {
-      console.log('Explicit question detected:', pattern)
       return 'question'
     }
   }
@@ -145,8 +113,6 @@ async function detectIntent(text: string): Promise<'food' | 'question'> {
   console.log('Defaulting to question')
   return 'question'
 }
-
-// Функции для работы с состояниями через Supabase
 async function getUserState(userId: number) {
   const { data, error } = await supabase
     .from('user_states')
@@ -167,7 +133,6 @@ async function getUserState(userId: number) {
   console.log('No state found for user:', userId)
   return null
 }
-
 async function setUserState(userId: number, state: string, data: any) {
   console.log('Setting user state:', userId, state, data)
   const { error } = await supabase
@@ -185,7 +150,6 @@ async function setUserState(userId: number, state: string, data: any) {
     console.error('Error setting user state:', error)
   }
 }
-
 async function clearUserState(userId: number) {
   console.log('Clearing user state:', userId)
   await supabase
@@ -193,7 +157,177 @@ async function clearUserState(userId: number) {
     .delete()
     .eq('telegram_id', userId)
 }
-
+async function saveChatMessage(dbUserId: number, role: 'user' | 'assistant' | 'system', content: string) {
+  try {
+    const { data, error } = await supabase
+      .from('chat_history')
+      .insert({
+        user_id: dbUserId,
+        role: role,
+        content: content
+      })
+      .select()
+    
+    if (error) {
+      console.error('Error saving chat message:', error)
+    }
+  } catch (error) {
+    console.error('Exception saving chat message:', error)
+  }
+}
+async function getChatHistory(dbUserId: number, limit: number = 10): Promise<Array<{role: string, content: string}>> {
+  try {
+    const { data, error } = await supabase
+      .from('chat_history')
+      .select('role, content')
+      .eq('user_id', dbUserId)
+      .order('created_at', { ascending: false })
+      .limit(limit)
+    
+    if (error) {
+      console.error('Error getting chat history:', error)
+      return []
+    }
+    
+    return data ? data.reverse() : []
+  } catch (error) {
+    console.error('Exception getting chat history:', error)
+    return []
+  }
+}
+async function clearChatHistory(dbUserId: number) {
+  try {
+    const { error } = await supabase
+      .from('chat_history')
+      .delete()
+      .eq('user_id', dbUserId)
+    
+    if (error) {
+      console.error('Error clearing chat history:', error)
+    }
+  } catch (error) {
+    console.error('Exception clearing chat history:', error)
+  }
+}
+async function saveUserPreference(
+  dbUserId: number,
+  preferenceType: 'allergy' | 'intolerance' | 'dislike' | 'exclude' | 'preference',
+  item: string,
+  description?: string
+) {
+  try {
+    console.log(`🎯 Saving preference for user ${dbUserId}: ${preferenceType} - ${item}`)
+    const { data, error } = await supabase
+      .from('user_preferences')
+      .upsert({
+        user_id: dbUserId,
+        preference_type: preferenceType,
+        item: item.toLowerCase(),
+        description: description,
+        updated_at: new Date().toISOString()
+      }, {
+        onConflict: 'user_id,preference_type,item'
+      })
+      .select()
+    
+    if (error) {
+      console.error('❌ Error saving user preference:', error)
+      console.error('Error details:', JSON.stringify(error))
+    } else {
+      console.log(`✅ Preference saved: ${item}`)
+    }
+  } catch (error) {
+    console.error('❌ Exception saving user preference:', error)
+  }
+}
+async function getUserPreferences(dbUserId: number): Promise<Array<any>> {
+  try {
+    const { data, error } = await supabase
+      .from('user_preferences')
+      .select('*')
+      .eq('user_id', dbUserId)
+    
+    if (error) {
+      console.error('Error getting user preferences:', error)
+      return []
+    }
+    
+    return data || []
+  } catch (error) {
+    console.error('Exception getting user preferences:', error)
+    return []
+  }
+}
+/**
+ * Удалить предпочтение пользователя
+ */
+async function deleteUserPreference(dbUserId: number, preferenceType: string, item: string) {
+  try {
+    const { error } = await supabase
+      .from('user_preferences')
+      .delete()
+      .eq('user_id', dbUserId)
+      .eq('preference_type', preferenceType)
+      .eq('item', item.toLowerCase())
+    
+    if (error) {
+      console.error('Error deleting user preference:', error)
+    }
+  } catch (error) {
+    console.error('Exception deleting user preference:', error)
+  }
+}
+/**
+ * Извлечь предпочтения из текста пользователя
+ */
+async function extractPreferencesFromText(text: string): Promise<Array<{type: string, item: string}>> {
+  const preferences: Array<{type: string, item: string}> = []
+  
+  // Словари для поиска
+  const intoleranceKeywords = ['непереносимость', 'не переношу', 'не усваивается', 'плохо от']
+  const allergyKeywords = ['аллергия', 'аллергичен', 'аллергична']
+  const excludeKeywords = ['без', 'не ем', 'не люблю', 'исключить', 'нельзя']
+  
+  const lowerText = text.toLowerCase()
+  
+  // Проверяем непереносимость
+  for (const keyword of intoleranceKeywords) {
+    if (lowerText.includes(keyword)) {
+      // Пытаемся извлечь продукт
+      if (lowerText.includes('лактоз')) preferences.push({type: 'intolerance', item: 'лактоза'})
+      if (lowerText.includes('глютен')) preferences.push({type: 'intolerance', item: 'глютен'})
+      if (lowerText.includes('молок') || lowerText.includes('молочн')) 
+        preferences.push({type: 'intolerance', item: 'молочные продукты'})
+    }
+  }
+  
+  // Проверяем аллергии
+  for (const keyword of allergyKeywords) {
+    if (lowerText.includes(keyword)) {
+      if (lowerText.includes('орех') || lowerText.includes('арахис')) 
+        preferences.push({type: 'allergy', item: 'орехи'})
+      if (lowerText.includes('мед')) preferences.push({type: 'allergy', item: 'мед'})
+      if (lowerText.includes('морепродукт')) preferences.push({type: 'allergy', item: 'морепродукты'})
+    }
+  }
+  
+  // Проверяем исключения
+  for (const keyword of excludeKeywords) {
+    if (lowerText.includes(keyword)) {
+      if (lowerText.includes('рыб')) preferences.push({type: 'exclude', item: 'рыба'})
+      if (lowerText.includes('мяс')) preferences.push({type: 'exclude', item: 'мясо'})
+      if (lowerText.includes('свинин')) preferences.push({type: 'exclude', item: 'свинина'})
+      if (lowerText.includes('говядин')) preferences.push({type: 'exclude', item: 'говядина'})
+      if (lowerText.includes('курин')) preferences.push({type: 'exclude', item: 'курица'})
+      // Но разрешаем творог и сыр при непереносимости лактозы
+      if (lowerText.includes('молок') && !lowerText.includes('творог') && !lowerText.includes('сыр')) {
+        preferences.push({type: 'exclude', item: 'молоко'})
+      }
+    }
+  }
+  
+  return preferences
+}
 /**
  * Получить информацию о подписке пользователя
  */
@@ -214,7 +348,6 @@ async function getSubscriptionInfo(dbUserId: number): Promise<any> {
     return null
   }
 }
-
 /**
  * Проверка доступа к функциям (есть ли активная подписка)
  */
@@ -240,7 +373,6 @@ async function checkSubscriptionAccess(dbUserId: number): Promise<boolean> {
     return false
   }
 }
-
 /**
  * Отправка сообщения в Telegram
  */
@@ -289,7 +421,6 @@ async function sendMessage(chatId: number, text: string, replyMarkup?: any, pars
     throw error
   }
 }
-
 /**
  * Ответ на callback query
  */
@@ -303,7 +434,6 @@ async function answerCallbackQuery(callbackQueryId: string, text?: string): Prom
     })
   })
 }
-
 /**
  * Редактирование сообщения
  */
@@ -332,7 +462,6 @@ async function editMessageText(
   
   return await response.json()
 }
-
 /**
  * Получить или создать пользователя
  */
@@ -357,7 +486,6 @@ async function getOrCreateUser(telegramId: number, username?: string, firstName?
   
   return newUser
 }
-
 /**
  * Генерация плана КБЖУ через OpenAI
  */
@@ -373,9 +501,7 @@ async function generateNutritionPlan(profileData: any): Promise<any> {
     maintain: 'держать вес',
     gain: 'набор веса'
   }
-
   const prompt = `Ты - профессиональный диетолог C.I.D. (Care • Insight • Discipline). Рассчитай КБЖУ для клиента.
-
 Данные клиента:
 - Имя: ${profileData.name}
 - Возраст: ${profileData.age} лет
@@ -385,7 +511,6 @@ async function generateNutritionPlan(profileData: any): Promise<any> {
 - Активность: ${activityNames[profileData.activity_level as keyof typeof activityNames]}
 - Цель: ${goalNames[profileData.goal as keyof typeof goalNames]}
 ${profileData.wishes ? `- Пожелания клиента: "${profileData.wishes}"` : ''}
-
 Выполни следующее:
 1. Рассчитай базовый метаболизм (BMR) используя формулу Миффлина-Сан Жеора
 2. Рассчитай общий расход калорий (TDEE) с учетом активности
@@ -394,7 +519,6 @@ ${profileData.wishes ? `- Пожелания клиента: "${profileData.wish
 5. Рассчитай норму воды в день (обычно 30-40 мл на кг веса)
 6. Дай рекомендации по активности
 7. ОБЯЗАТЕЛЬНО учти пожелания клиента в рекомендациях
-
 Верни результат СТРОГО в формате JSON:
 {
     "bmr": число,
@@ -407,7 +531,6 @@ ${profileData.wishes ? `- Пожелания клиента: "${profileData.wish
     "methodology_explanation": "подробное объяснение расчетов и методики",
     "activity_recommendations": "рекомендации по активности с учетом пожеланий клиента"
 }`
-
   console.log('Calling OpenAI API for nutrition plan...')
   
   try {
@@ -434,13 +557,11 @@ ${profileData.wishes ? `- Пожелания клиента: "${profileData.wish
         max_tokens: 1000
       })
     })
-
     if (!response.ok) {
       const errorText = await response.text()
       console.error('OpenAI API error:', response.status, errorText)
       throw new Error(`OpenAI API error: ${response.status}`)
     }
-
     const data = await response.json()
     console.log('OpenAI response received')
     
@@ -455,38 +576,12 @@ ${profileData.wishes ? `- Пожелания клиента: "${profileData.wish
     throw error
   }
 }
-
-/**
- * Корректировка плана на основе запроса пользователя
- */
 async function adjustNutritionPlan(currentPlan: any, userRequest: string, profileData: any): Promise<any> {
-  const prompt = `Ты - C.I.D., профессиональный диетолог. Клиент хочет скорректировать свой план питания.
-
-Текущий план:
-- Калории: ${currentPlan.calories} ккал
-- Белки: ${currentPlan.protein} г
-- Жиры: ${currentPlan.fats} г
-- Углеводы: ${currentPlan.carbs} г
-- Вода: ${currentPlan.water} л
-
-Данные клиента:
-- Имя: ${profileData.name}
-- Возраст: ${profileData.age} лет
-- Пол: ${profileData.gender === 'male' ? 'мужской' : 'женский'}
-- Текущий вес: ${profileData.current_weight} кг
-
-Запрос клиента: "${userRequest}"
-
-Скорректируй план с учетом пожеланий. Верни результат в формате JSON:
-{
-    "target_calories": число,
-    "protein_grams": число,
-    "fats_grams": число,
-    "carbs_grams": число,
-    "water_liters": число,
-    "adjustment_explanation": "короткое объяснение текущей корректировки (1-2 предложения)"
-}`
-
+  const prompt = `Ты C.I.D., диетолог. Клиент хочет скорректировать план.
+Текущий план: ${currentPlan.calories} ккал, ${currentPlan.protein}г белка, ${currentPlan.fats}г жиров, ${currentPlan.carbs}г углеводов, ${currentPlan.water}л воды
+Данные: ${profileData.name}, ${profileData.age} лет, ${profileData.gender === 'male' ? 'мужской' : 'женский'}, ${profileData.current_weight} кг
+Запрос: "${userRequest}"
+Верни JSON: {"target_calories": число, "protein_grams": число, "fats_grams": число, "carbs_grams": число, "water_liters": число, "adjustment_explanation": "объяснение"}`
   const response = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -498,7 +593,7 @@ async function adjustNutritionPlan(currentPlan: any, userRequest: string, profil
       messages: [
         {
           role: 'system',
-          content: 'Ты C.I.D. - опытный диетолог. Помогаешь корректировать планы питания безопасно и эффективно. НЕ повторяй предыдущие корректировки в adjustment_explanation.'
+          content: 'Ты C.I.D. - диетолог. Корректируй планы питания безопасно.'
         },
         {
           role: 'user',
@@ -510,11 +605,9 @@ async function adjustNutritionPlan(currentPlan: any, userRequest: string, profil
       max_tokens: 500
     })
   })
-
   const data = await response.json()
   return JSON.parse(data.choices[0].message.content)
 }
-
 /**
  * Очистка текста от Markdown разметки
  */
@@ -530,7 +623,6 @@ function cleanMarkdown(text: string): string {
     .replace(/#{1,6}\s/g, '')  // Убираем заголовки
     .trim()
 }
-
 /**
  * Форматирование карточки КБЖУ (БЕЗ Markdown)
  */
@@ -549,24 +641,19 @@ function formatNutritionCard(plan: any, profileData: any): string {
   const recommendations = cleanMarkdown(plan.activity_recommendations || 'Следуйте вашей текущей программе тренировок')
   
   return `📊 КАРТОЧКА КБЖУ ДЛЯ ${name.toUpperCase()}
-
 🔥 Калории: ${calories} ккал/день
 🥩 Белки: ${protein} г
 🥑 Жиры: ${fats} г
 🍞 Углеводы: ${carbs} г
 💧 Вода: ${water} л/день
-
 📈 Метаболизм:
 • Базовый (BMR): ${bmr.toFixed(0)} ккал/день
 • Общий расход (TDEE): ${tdee.toFixed(0)} ккал/день
-
 ${methodology}
-
 💪 Рекомендации по активности:
 ${recommendations}
 `
 }
-
 /**
  * Клавиатура приветствия
  */
@@ -577,7 +664,6 @@ function welcomeKeyboard() {
     ]
   }
 }
-
 /**
  * Клавиатура для карточки КБЖУ
  */
@@ -594,7 +680,6 @@ function nutritionCardKeyboard() {
     ]
   }
 }
-
 /**
  * Главное меню (реплай клавиатура)
  */
@@ -614,7 +699,6 @@ function getMainKeyboard() {
     one_time_keyboard: false
   }
 }
-
 /**
  * Меню дневника
  */
@@ -635,7 +719,6 @@ function getDiaryKeyboard() {
     one_time_keyboard: false
   }
 }
-
 /**
  * Меню настроек
  */
@@ -647,6 +730,9 @@ function getSettingsKeyboard() {
         { text: "👤 Профиль" }
       ],
       [
+        { text: "🎯 Мои предпочтения" }
+      ],
+      [
         { text: "🔙 Назад" }
       ]
     ],
@@ -654,7 +740,6 @@ function getSettingsKeyboard() {
     one_time_keyboard: false
   }
 }
-
 /**
  * Клавиатура выбора пола
  */
@@ -668,7 +753,6 @@ function genderKeyboard() {
     ]
   }
 }
-
 /**
  * Клавиатура выбора активности
  */
@@ -681,7 +765,6 @@ function activityKeyboard() {
     ]
   }
 }
-
 /**
  * Клавиатура выбора цели
  */
@@ -694,7 +777,6 @@ function goalKeyboard() {
     ]
   }
 }
-
 /**
  * Обработка команды /start
  */
@@ -715,26 +797,16 @@ async function handleStartCommand(message: TelegramMessage) {
   // Если профиля нет - показываем приветствие
   if (!profile) {
     const welcomeMessage = `👋 **Привет, ${message.from.first_name}!** Я C.I.D. — Care • Insight • Discipline.
-
 Твой AI-наставник по питанию и привычкам.
 Я помогу тебе рассчитать рацион, вести учёт и не терять фокус.
-
 🎯 **Что я умею:**
-
 📊 Рассчитываю персональный КБЖУ на основе твоих данных (возраст, вес, рост, активность, цели) по научной методике Миффлина-Сан Жеора
-
 🍽️ Помогаю записывать приемы пищи текстом или голосом. AI анализирует блюда и показывает детализацию по продуктам
-
 📋 Даю рекомендации по рецептам с учетом остатка дневного КБЖУ, предупреждаю о переедании, планирую меню на день/неделю
-
 📊 Веду дневник питания с визуализацией прогресса, статистикой воды и историей корректировок
-
 🎤 Поддерживаю голосовой ввод везде - наговаривай вместо печати
-
 📸 Распознавание по фото - сфотографируй еду - я автоматически распознаю продукты и рассчитаю КБЖУ 
-
 ✏️ Гибко настраиваю план питания через AI, учитываю твои пожелания и даю персональные советы
-
 Готов начать? 🚀`
     
     await sendMessage(message.chat.id, welcomeMessage, welcomeKeyboard())
@@ -810,7 +882,6 @@ async function handleStartCommand(message: TelegramMessage) {
   // Отправляем главное меню отдельным сообщением
   await sendMessage(message.chat.id, "🏠 **Главное меню**", getMainKeyboard())
 }
-
 /**
  * Обработка callback query
  */
@@ -958,9 +1029,7 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
   // Готово
   else if (data === 'card_done') {
     const welcomeText = `✅ Отлично! Старт положен и ты уже начал путь к своей цели!
-
 "Путь в тысячу миль начинается с первого шага!"
-
 💡 Все параметры рассчитаны с помощью ИИ и максимально приближены к реальности, но помни — это ориентиры для старта. Слушай своё тело и корректируй план по мере необходимости.`
     
     await sendMessage(chatId, welcomeText)
@@ -1071,12 +1140,9 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
     await sendMessage(
       chatId,
       `🍽 **Запись приема пищи**
-
 Напиши или наговори, что ты поел/выпил.
-
 💡 **Для точности:** укажи каждый продукт с граммовкой.
 📝 **Важно:** крупы взвешиваем в сухом виде, мясо — в готовом.
-
 Можешь написать примерно: "тарелка супа" или "рис с мясом" — я уточню детали.`,
       {
         inline_keyboard: [
@@ -1092,17 +1158,13 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
     await sendMessage(
       chatId,
       `💬 **Режим диалога активирован**
-
 Привет! Я твой AI-диетолог. Теперь все твои сообщения будут обрабатываться как вопросы о питании.
-
 ✨ **Что я могу:**
 • Предложить рецепты с учетом КБЖУ
 • Составить меню на день/неделю
 • Дать совет по питанию
 • Помочь с выбором продуктов
-
 📝 **Записать еду?** Нажми "Главное меню" и просто напиши что съел в чат.
-
 Задавай вопросы! 😊`,
       {
         inline_keyboard: [
@@ -1402,6 +1464,28 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
     await sendMessage(chatId, "❌ Действие отменено", getMainKeyboard())
   }
   
+  // Очистить все предпочтения
+  else if (data === 'clear_all_preferences') {
+    // Удаляем все предпочтения пользователя
+    const { error } = await supabase
+      .from('user_preferences')
+      .delete()
+      .eq('user_id', user.id)
+    
+    if (error) {
+      console.error('Error clearing preferences:', error)
+      await sendMessage(chatId, "❌ Ошибка очистки предпочтений")
+    } else {
+      await sendMessage(chatId, "✅ Все предпочтения удалены.\n\nТеперь ты можешь установить новые в диалоге с C.I.D.", getMainKeyboard())
+    }
+  }
+  
+  // Очистить историю диалога
+  else if (data === 'clear_chat_history') {
+    await clearChatHistory(user.id)
+    await sendMessage(chatId, "✅ История диалога очищена.\n\nНачнем с чистого листа! 🎯", getMainKeyboard())
+  }
+  
   // Управление приемами пищи
   else if (data === 'manage_meals') {
     await manageMeals(chatId, user.id)
@@ -1616,7 +1700,6 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
     )
   }
 }
-
 /**
  * Обработка текстовых сообщений
  */
@@ -2104,7 +2187,6 @@ async function handleTextMessage(message: TelegramMessage) {
     )
   }
 }
-
 /**
  * Обработка навигационных кнопок
  */
@@ -2163,13 +2245,16 @@ async function handleNavigationButtons(message: TelegramMessage, user: any) {
       await showSubscriptionMenu(chatId, user.id)
       break
     
+    case '🎯 Мои предпочтения':
+      await showUserPreferencesMenu(chatId, user.id)
+      break
+    
     default:
       return false // Не обработано
   }
   
   return true // Обработано
 }
-
 /**
  * Обработка редактирования приема пищи
  */
@@ -2187,16 +2272,12 @@ async function handleMealEdit(userId: number, chatId: number, dbUserId: number, 
     
     // Анализируем новое описание через OpenAI
     const prompt = `Ты - C.I.D., AI-диетолог. Проанализируй прием пищи клиента.
-
 Описание: "${newDescription}"
-
 Дневной план: ${plan.calories} ккал (Б: ${plan.protein}г, Ж: ${plan.fats}г, У: ${plan.carbs}г)
-
 Задачи:
 1. Рассчитай КБЖУ этого приема
 2. Распиши детализацию по каждому продукту (название, вес, КБЖУ)
 3. Дай краткий комментарий
-
 Верни JSON:
 {
   "calories": число,
@@ -2215,7 +2296,6 @@ async function handleMealEdit(userId: number, chatId: number, dbUserId: number, 
   ],
   "comment": "краткий комментарий"
 }`
-
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -2233,7 +2313,6 @@ async function handleMealEdit(userId: number, chatId: number, dbUserId: number, 
         max_tokens: 500
       })
     })
-
     const data = await response.json()
     const analysis = JSON.parse(data.choices[0].message.content)
     
@@ -2265,12 +2344,10 @@ async function handleMealEdit(userId: number, chatId: number, dbUserId: number, 
     }
     
     const resultText = `✅ Прием пищи обновлен!
-
 🔥 Калории: ${analysis.calories} ккал
 🥩 Белки: ${analysis.protein}г
 🥑 Жиры: ${analysis.fats}г
 🍞 Углеводы: ${analysis.carbs}г${breakdownText}
-
 💬 ${analysis.comment}`
     
     await sendMessage(chatId, resultText, {
@@ -2287,7 +2364,6 @@ async function handleMealEdit(userId: number, chatId: number, dbUserId: number, 
     await sendMessage(chatId, "❌ Ошибка обновления приема пищи. Попробуй еще раз.")
   }
 }
-
 /**
  * Обработка редактирования параметров
  */
@@ -2411,7 +2487,6 @@ async function handleParameterEdit(userId: number, chatId: number, dbUserId: num
     await sendMessage(chatId, "❌ Ошибка обновления параметра")
   }
 }
-
 /**
  * Запись приема пищи
  */
@@ -2443,29 +2518,23 @@ async function handleFoodLogging(userId: number, chatId: number, dbUserId: numbe
 2. Для блюд с указанием объема ("тарелка супа", "салат 350г") - используй эти данные для расчета
 3. Если у продукта указан вес (даже приблизительный) - рассчитывай КБЖУ, не запрашивай уточнение
 4. Запрашивай уточнение ТОЛЬКО если совсем нет информации о количестве
-
 Примеры:
 - "банан 150г, яблоко 200г" → все веса есть, считай
 - "тарелка супа 250мл, салат 350г" → все веса есть, считай  
 - "банан, яблоко" → спроси: "Укажите примерный вес"`
     
     const prompt = `Ты - C.I.D., AI-диетолог. Проанализируй прием пищи клиента.
-
 Описание: "${foodDescription}"
-
 Дневной план: ${plan.calories} ккал (Б: ${plan.protein}г, Ж: ${plan.fats}г, У: ${plan.carbs}г)
-
 Задачи:${clarificationNote}
 4. Рассчитай КБЖУ этого приема
 5. Распиши детализацию по каждому продукту (название, вес, КБЖУ)
 6. Дай краткий комментарий (вписывается ли в план)
-
 КРИТИЧЕСКИ ВАЖНО:
 - ВСЕГДА рассчитывай КБЖУ если есть ХОТЬ КАКАЯ-ТО информация о количестве/весе
 - Игнорируй опечатки в словах (например: "окурцов" = огурцов, "милилитров" = миллилитров)
 - Для блюд используй стандартные рецепты (суп овощной ~40-50 ккал/100г, салат из овощей ~30-40 ккал/100г)
 - Если указан объем (250мл, 350г) - это достаточно для расчета, не запрашивай уточнение!
-
 ⚠️ ИСПОЛЬЗУЙ СТАНДАРТНЫЕ ТАБЛИЦЫ БЖУ:
 - Тунец запеченный/отварной: ~130-150 ккал/100г, Б: 28-30г, Ж: 1-2г, У: 0г
 - Тунец консервированный в масле: ~200 ккал/100г
@@ -2473,20 +2542,16 @@ async function handleFoodLogging(userId: number, chatId: number, dbUserId: numbe
 - Рис отварной: ~130 ккал/100г, Б: 2.7г, Ж: 0.3г, У: 28г
 - Фетакса (сыр фета): ~260 ккал/100г, Б: 16г, Ж: 21г, У: 1г
 - Овощи свежие (огурцы/помидоры): ~15-20 ккал/100г
-
 ⚠️ БУДЬ ПОСЛЕДОВАТЕЛЬНЫМ:
 - Одинаковые продукты ВСЕГДА должны иметь одинаковую калорийность на 100г
 - Используй точные данные из таблиц БЖУ, не придумывай значения
 - Для "запеченного тунца" ВСЕГДА используй ~130-150 ккал/100г
-
 Примеры:
 ✅ "тарелка супа 250мл, салат 350г" → есть вес, считай КБЖУ
 ✅ "банан 150г" → есть вес, считай
 ✅ "порция курицы 200г" → есть вес, считай
 ❌ "банан" → нет веса, запроси уточнение
-
 ⚠️ НИКОГДА не возвращай 0 калорий если есть информация о количестве!
-
 Верни JSON:
 {
   "need_clarification": true/false,
@@ -2507,7 +2572,6 @@ async function handleFoodLogging(userId: number, chatId: number, dbUserId: numbe
   ],
   "comment": "краткий комментарий"
 }`
-
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -2525,7 +2589,6 @@ async function handleFoodLogging(userId: number, chatId: number, dbUserId: numbe
         max_tokens: 500
       })
     })
-
     const data = await response.json()
     console.log('OpenAI response for food logging:', JSON.stringify(data))
     
@@ -2586,14 +2649,10 @@ async function handleFoodLogging(userId: number, chatId: number, dbUserId: numbe
     const timeStr = now.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
     
     const resultText = `✅ **Прием пищи записан!**
-
 📝 ${foodDescription}
-
 🔥 ${analysis.calories} ккал | 🥩 Б: ${analysis.protein}г | 🥑 Ж: ${analysis.fats}г | 🍞 У: ${analysis.carbs}г${breakdownText}
-
 ⏰ ${timeStr}
 💬 ${analysis.comment}
-
 💡 **Совет:** В следующий раз можешь просто 📸 сфотографировать еду!`
     
     // Post-action buttons: редактировать, удалить, статистика
@@ -2618,15 +2677,37 @@ async function handleFoodLogging(userId: number, chatId: number, dbUserId: numbe
     await sendMessage(chatId, "❌ Ошибка записи. Попробуй еще раз.")
   }
 }
-
 /**
  * Обработка запроса рецепта
  */
 async function handleRecipeRequest(userId: number, chatId: number, dbUserId: number, request: string) {
   try {
-    await sendMessage(chatId, "⏳ Подбираю рецепт...")
+    console.log(`🤖 handleRecipeRequest called for user ${dbUserId}`)
+    await sendMessage(chatId, "🤔 Думаю...")
     
-    // Получаем план и записи за сегодня
+    // 1. Извлекаем предпочтения из текущего запроса и сохраняем их
+    console.log(`🔍 Extracting preferences from text: "${request}"`)
+    const extractedPrefs = await extractPreferencesFromText(request)
+    console.log(`Found ${extractedPrefs.length} preferences:`, extractedPrefs)
+    
+    for (const pref of extractedPrefs) {
+      await saveUserPreference(
+        dbUserId,
+        pref.type as 'allergy' | 'intolerance' | 'dislike' | 'exclude' | 'preference',
+        pref.item
+      )
+    }
+    
+    // 2. Получаем все предпочтения пользователя
+    console.log(`📋 Loading all user preferences...`)
+    const userPreferences = await getUserPreferences(dbUserId)
+    console.log(`User has ${userPreferences.length} saved preferences`)
+    
+    // 3. Получаем историю диалога (последние 10 сообщений)
+    const chatHistory = await getChatHistory(dbUserId, 10)
+    console.log(`📚 Chat history loaded: ${chatHistory.length} messages`)
+    
+    // 4. Получаем план и записи за сегодня
     const { data: plan } = await supabase
       .from('nutrition_plans')
       .select('*')
@@ -2653,23 +2734,87 @@ async function handleRecipeRequest(userId: number, chatId: number, dbUserId: num
     const lastMeal = todayLogs?.[0]
     const timeSinceLastMeal = lastMeal ? (Date.now() - new Date(lastMeal.logged_at).getTime()) / (1000 * 60) : 999
     
-    const prompt = `Ты - C.I.D., AI-диетолог. Помоги клиенту с питанием.
-
-Запрос: "${request}"
-
-Дневной план: ${plan.calories} ккал (Б: ${plan.protein}г, Ж: ${plan.fats}г, У: ${plan.carbs}г)
+    // 5. Формируем информацию о предпочтениях для промпта
+    let preferencesText = ''
+    if (userPreferences.length > 0) {
+      preferencesText = '\n\n🚫 ВАЖНЫЕ ОГРАНИЧЕНИЯ ПОЛЬЗОВАТЕЛЯ:\n'
+      const allergies = userPreferences.filter(p => p.preference_type === 'allergy')
+      const intolerances = userPreferences.filter(p => p.preference_type === 'intolerance')
+      const excludes = userPreferences.filter(p => p.preference_type === 'exclude')
+      
+      if (allergies.length > 0) {
+        preferencesText += `- Аллергия: ${allergies.map(p => p.item).join(', ')}\n`
+      }
+      if (intolerances.length > 0) {
+        preferencesText += `- Непереносимость: ${intolerances.map(p => p.item).join(', ')}\n`
+      }
+      if (excludes.length > 0) {
+        preferencesText += `- Исключить из рациона: ${excludes.map(p => p.item).join(', ')}\n`
+      }
+      
+      // Специальная обработка для лактозы
+      if (intolerances.some(p => p.item.includes('лактоз') || p.item.includes('молок'))) {
+        preferencesText += '\n⚠️ При непереносимости лактозы: МОЖНО творог и твердые сыры (в них почти нет лактозы), но НЕЛЬЗЯ молоко, сливки, мягкие сыры, йогурты.\n'
+      }
+    }
+    
+    // 6. Составляем системное сообщение с контекстом
+    const systemMessage = `Ты - C.I.D., AI-диетолог. Помогаешь клиенту с питанием.
+📊 ИНФОРМАЦИЯ О КЛИЕНТЕ:
+Дневной план: ${plan?.calories || 'не установлен'} ккал (Б: ${plan?.protein || 0}г, Ж: ${plan?.fats || 0}г, У: ${plan?.carbs || 0}г)
 Съедено сегодня: ${consumed.calories} ккал (Б: ${consumed.protein}г, Ж: ${consumed.fats}г, У: ${consumed.carbs}г)
-Последний прием: ${Math.round(timeSinceLastMeal)} минут назад
-
-Задачи:
-1. Если прием был недавно (<2ч) - предложи перекус/воду или спроси про эмоциональный голод
-2. Если запрос про меню на день/неделю - составь план
-3. Иначе - предложи рецепт с учетом остатка КБЖУ
-
-ВАЖНО: В ответе клиенту НЕ упоминай точные цифры минут/часов с последнего приема. Говори обобщенно: "недавно поел", "давно не ел", "уже пора перекусить" и т.д.
-
-Верни краткий ответ (до 500 символов) с рекомендацией.`
-
+Последний прием: ${Math.round(timeSinceLastMeal)} минут назад${preferencesText}
+📝 ТВОИ ЗАДАЧИ:
+1. ВСЕГДА учитывай ограничения пользователя - это критически важно!
+2. Если прием был недавно (<2ч) - предложи перекус/воду или спроси про эмоциональный голод
+3. Если запрос про меню на день/неделю - составь план СТРОГО в рамках дневного плана КБЖУ
+4. Иначе - предложи рецепт с учетом остатка КБЖУ и ограничений
+5. Запоминай контекст предыдущих сообщений - это непрерывный диалог
+🚨 КРИТИЧЕСКИ ВАЖНО ПРИ СОСТАВЛЕНИИ МЕНЮ НА ДЕНЬ:
+- ИТОГОВЫЕ КБЖУ ДОЛЖНЫ СОВПАДАТЬ С ДНЕВНЫМ ПЛАНОМ (±50 ккал)
+- План: ${plan?.calories || 0} ккал, Б: ${plan?.protein || 0}г, Ж: ${plan?.fats || 0}г, У: ${plan?.carbs || 0}г
+- НЕ превышай эти значения! Распределяй калории между приемами пищи
+- В конце ОБЯЗАТЕЛЬНО покажи итоговые КБЖУ и сравни с планом
+⚠️ ВАЖНО: 
+- В ответе клиенту НЕ упоминай точные цифры минут/часов с последнего приема
+- Говори обобщенно: "недавно поел", "давно не ел", "уже пора перекусить"
+- При составлении планов указывай время приема пищи
+- Если пользователь упомянул новые ограничения, подтверди что запомнил их
+📱 ФОРМАТИРОВАНИЕ ДЛЯ TELEGRAM:
+- НЕ используй markdown заголовки (####, ###, ##)
+- Используй эмодзи для выделения разделов: 🍽️, 🕐, 📊, 🔥
+- Для времени используй: 🕐 20:00 или ⏰ 20:00
+- Для КБЖУ используй: 🔥 600 ккал (Б: 50г, Ж: 15г, У: 40г)
+- Для списков используй эмодзи: • или -
+- НЕ добавляй лишние пустые строки между разделами
+- Максимум 1 пустая строка между приемами пищи
+- Используй жирный текст **только** для важных моментов
+- Делай текст компактным и читаемым
+ПРИМЕР ПРАВИЛЬНОГО ФОРМАТИРОВАНИЯ:
+🕐 08:00 - Завтрак
+• Овсянка с ягодами - 50г
+• Миндаль - 15г
+🔥 400 ккал (Б: 10г, Ж: 15г, У: 60г)
+🕐 14:00 - Обед  
+• Куриное филе - 150г
+• Брокколи - 100г
+🔥 500 ккал (Б: 60г, Ж: 15г, У: 30г)
+📊 Итого: 900 ккал`
+    
+    // 7. Формируем массив сообщений с историей
+    const messages: Array<{role: string, content: string}> = [
+      { role: 'system', content: systemMessage }
+    ]
+    
+    // Добавляем историю диалога
+    if (chatHistory.length > 0) {
+      messages.push(...chatHistory)
+    }
+    
+    // Добавляем текущий запрос пользователя
+    messages.push({ role: 'user', content: request })
+    
+    // 8. Отправляем запрос в OpenAI
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -2678,33 +2823,38 @@ async function handleRecipeRequest(userId: number, chatId: number, dbUserId: num
       },
       body: JSON.stringify({
         model: 'gpt-4o-mini',
-        messages: [
-          { role: 'system', content: 'Ты C.I.D. - AI-диетолог. Помогаешь с рецептами и планированием питания.' },
-          { role: 'user', content: prompt }
-        ],
+        messages: messages,
         temperature: 0.8,
-        max_tokens: 700
+        max_tokens: 1500
       })
     })
-
     const data = await response.json()
     const recommendation = data.choices[0].message.content
     
+    // 9. Сохраняем сообщения в историю диалога
+    await saveChatMessage(dbUserId, 'user', request)
+    await saveChatMessage(dbUserId, 'assistant', recommendation)
+    
+    // 10. Отправляем ответ пользователю с кнопкой главного меню
     await sendMessage(chatId, `📋 ${recommendation}`, {
       inline_keyboard: [
-        [{ text: "💬 Продолжить диалог", callback_data: "menu_recipes" }],
-        [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+        [
+          {
+            text: "🏠 Главное меню",
+            callback_data: "main_menu"
+          }
+        ]
       ]
     })
     
     // НЕ очищаем state - пользователь остается в режиме диалога
-    // Он выйдет когда нажмет "Главное меню"
+    // Он может просто продолжить писать, диалог идет непрерывно
+    // Выход через кнопку "🔙 Назад" или "🏠 Главное меню" на клавиатуре
   } catch (error) {
     console.error('Error handling recipe request:', error)
     await sendMessage(chatId, "❌ Ошибка. Попробуй еще раз.")
   }
 }
-
 /**
  * Обработка голосовых сообщений
  */
@@ -2769,7 +2919,6 @@ async function handleVoiceMessage(message: TelegramMessage) {
     await sendMessage(chatId, "❌ Ошибка обработки голосового сообщения. Попробуй написать текстом.")
   }
 }
-
 /**
  * Функция для получения URL фото
  */
@@ -2789,7 +2938,6 @@ async function getPhotoUrl(fileId: string): Promise<string | null> {
     return null
   }
 }
-
 /**
  * Анализ фото с едой через GPT-4 Vision
  */
@@ -2798,11 +2946,8 @@ async function analyzeFoodPhoto(photoUrl: string, caption?: string): Promise<any
 1. Какие продукты/блюда на фото
 2. Примерный вес/объем каждого продукта в граммах
 3. Калории, белки, жиры, углеводы для каждого продукта
-
 ${caption ? `Дополнительная информация от пользователя: ${caption}` : ''}
-
 ВАЖНО: Это примерная оценка на основе визуального анализа. Точность может быть невысокой.
-
 Ответь в формате JSON:
 {
   "items": [
@@ -2824,7 +2969,6 @@ ${caption ? `Дополнительная информация от пользо
   "confidence": "low/medium/high",
   "notes": "дополнительные заметки"
 }`
-
   const response = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -2869,7 +3013,6 @@ ${caption ? `Дополнительная информация от пользо
     throw new Error('Не удалось распознать содержимое фото. Попробуй еще раз.')
   }
 }
-
 /**
  * Обработка фото с едой
  */
@@ -2970,7 +3113,6 @@ async function handlePhotoMessage(message: TelegramMessage) {
     await sendMessage(chatId, "❌ Ошибка анализа фото. Попробуй еще раз или опиши еду текстом.")
   }
 }
-
 /**
  * Показать меню уведомлений
  */
@@ -3002,15 +3144,12 @@ async function showNotificationsMenu(chatId: number, dbUserId: number) {
     const waterStatus = settings.water_notifications_enabled ? '✅ Вкл' : '❌ Выкл'
     
     const menuText = `🔔 **Настройки уведомлений**
-
 📊 **Уведомления о еде:** ${foodStatus}
 Напоминания о приемах пищи с ${settings.food_notification_start_time.substring(0, 5)} до ${settings.food_notification_end_time.substring(0, 5)}
 Количество напоминаний: ${settings.food_notification_count} раз в день
-
 💧 **Уведомления о воде:** ${waterStatus}
 Напоминания пить воду с ${settings.water_notification_start_time.substring(0, 5)} до ${settings.water_notification_end_time.substring(0, 5)}
 Интервал: каждые ${settings.water_notification_interval_minutes} минут
-
 💡 Уведомления помогут тебе не забывать о питании и поддерживать водный баланс!`
     
     await sendMessage(chatId, menuText, {
@@ -3031,7 +3170,6 @@ async function showNotificationsMenu(chatId: number, dbUserId: number) {
     await sendMessage(chatId, "❌ Ошибка загрузки настроек уведомлений")
   }
 }
-
 /**
  * Переключить уведомления
  */
@@ -3071,7 +3209,6 @@ async function toggleNotifications(chatId: number, dbUserId: number, type: 'food
     await sendMessage(chatId, "❌ Ошибка изменения настроек")
   }
 }
-
 /**
  * Показать меню помощи
  */
@@ -3098,43 +3235,28 @@ async function showHelpMenu(chatId: number, dbUserId: number) {
   const helpText = `❓ **Помощь и поддержка**
 ${subscriptionText}
 🤖 **Что умеет C.I.D.:**
-
 📊 **Персональный план КБЖУ**
 Рассчитываю рацион по научной методике Миффлина-Сан Жеора на основе твоих данных (возраст, вес, рост, активность, цели)
-
 🍽️ **Умная запись еды**
 Записывай приемы пищи текстом, голосом или 📸 фотографией. AI анализирует блюда и показывает детальную разбивку по продуктам
-
 💬 **AI-диетолог**
 Отвечаю на вопросы о питании, предлагаю рецепты с учетом остатка КБЖУ, предупреждаю о переедании, планирую меню
-
 📋 **Дневник питания**
 Веду историю приемов пищи с визуализацией прогресса, статистикой воды и возможностью редактирования
-
 🎤 **Голосовой ввод**
 Поддерживаю голосовые сообщения - наговаривай вместо печати
-
 📸 **Распознавание по фото**
 Сфотографируй еду - я автоматически распознаю продукты и рассчитаю КБЖУ
-
 ✏️ **Гибкие настройки**
 Корректируй план питания через AI, получай персональные советы и рекомендации
-
 ---
-
 💎 **Поддержать проект:**
-
 Спасибо всем, кто поддерживает развитие бота! Ваша поддержка помогает делать C.I.D. лучше каждый день.
-
 ---
-
 📞 **Связь с администратором:**
-
 По всем вопросам, предложениям и проблемам пишите:
 👤 @gena12m
-
 Буду рад вашей обратной связи! 🙏`
-
   await sendMessage(chatId, helpText, {
     inline_keyboard: [
       [{ text: "💝 Поддержать проект", callback_data: "support_project" }],
@@ -3142,7 +3264,6 @@ ${subscriptionText}
     ]
   })
 }
-
 /**
  * Показать меню профиля пользователя
  */
@@ -3239,7 +3360,83 @@ async function showProfileMenu(chatId: number, dbUserId: number) {
     await sendMessage(chatId, "❌ Ошибка загрузки профиля")
   }
 }
-
+/**
+ * Показать меню предпочтений пользователя
+ */
+async function showUserPreferencesMenu(chatId: number, dbUserId: number) {
+  try {
+    const preferences = await getUserPreferences(dbUserId)
+    
+    let text = `🎯 **Мои предпочтения**\n\n`
+    
+    if (preferences.length === 0) {
+      text += `У тебя пока нет сохраненных предпочтений.\n\n`
+      text += `💡 Просто упомяни их в диалоге с C.I.D.! Например:\n`
+      text += `• "У меня непереносимость лактозы"\n`
+      text += `• "Я не ем рыбу"\n`
+      text += `• "Без глютена"\n\n`
+      text += `Я автоматически запомню и всегда буду учитывать это при составлении планов питания.`
+    } else {
+      // Группируем предпочтения по типам
+      const allergies = preferences.filter(p => p.preference_type === 'allergy')
+      const intolerances = preferences.filter(p => p.preference_type === 'intolerance')
+      const excludes = preferences.filter(p => p.preference_type === 'exclude')
+      const dislikes = preferences.filter(p => p.preference_type === 'dislike')
+      
+      if (allergies.length > 0) {
+        text += `🚫 **Аллергии:**\n`
+        allergies.forEach(p => {
+          text += `• ${p.item}\n`
+        })
+        text += `\n`
+      }
+      
+      if (intolerances.length > 0) {
+        text += `⚠️ **Непереносимость:**\n`
+        intolerances.forEach(p => {
+          text += `• ${p.item}\n`
+        })
+        text += `\n`
+      }
+      
+      if (excludes.length > 0) {
+        text += `❌ **Исключено из рациона:**\n`
+        excludes.forEach(p => {
+          text += `• ${p.item}\n`
+        })
+        text += `\n`
+      }
+      
+      if (dislikes.length > 0) {
+        text += `👎 **Не нравится:**\n`
+        dislikes.forEach(p => {
+          text += `• ${p.item}\n`
+        })
+        text += `\n`
+      }
+      
+      text += `\n💡 Эти предпочтения учитываются при составлении планов питания и рецептов.`
+    }
+    
+    const keyboard: any[] = []
+    
+    if (preferences.length > 0) {
+      keyboard.push([{ text: "🗑 Очистить все предпочтения", callback_data: "clear_all_preferences" }])
+    }
+    
+    keyboard.push(
+      [{ text: "🔄 Очистить историю диалога", callback_data: "clear_chat_history" }],
+      [{ text: "🔙 Назад", callback_data: "cancel_action" }]
+    )
+    
+    await sendMessage(chatId, text, {
+      inline_keyboard: keyboard
+    })
+  } catch (error) {
+    console.error('Error showing preferences menu:', error)
+    await sendMessage(chatId, "❌ Ошибка загрузки предпочтений")
+  }
+}
 /**
  * Показать меню подписки
  */
@@ -3334,7 +3531,6 @@ async function showSubscriptionMenu(chatId: number, dbUserId: number) {
     await sendMessage(chatId, "❌ Ошибка загрузки информации о подписке")
   }
 }
-
 /**
  * Управление приемами пищи (за последние 2 дня)
  */
@@ -3425,7 +3621,6 @@ async function manageMeals(chatId: number, dbUserId: number) {
     await sendMessage(chatId, "❌ Ошибка загрузки приемов пищи")
   }
 }
-
 /**
  * Показать подтверждение удаления приема пищи
  */
@@ -3468,7 +3663,6 @@ async function deleteMeal(chatId: number, dbUserId: number, mealId: number) {
     await sendMessage(chatId, "❌ Ошибка")
   }
 }
-
 /**
  * Подтвердить удаление приема пищи
  */
@@ -3514,7 +3708,6 @@ async function confirmDeleteMeal(chatId: number, dbUserId: number, mealId: numbe
     await sendMessage(chatId, "❌ Ошибка удаления приема пищи")
   }
 }
-
 /**
  * Показать дневник
  */
@@ -3552,26 +3745,22 @@ async function showDiary(chatId: number, dbUserId: number) {
     }), { calories: 0, protein: 0, fats: 0, carbs: 0 }) || { calories: 0, protein: 0, fats: 0, carbs: 0 }
     
     let diaryText = `📊 **Дневник за ${new Date().toLocaleDateString('ru-RU')}**
-
 **План на день:**
 🔥 Калории: ${plan.calories} ккал
 🥩 Белки: ${plan.protein}г
 🥑 Жиры: ${plan.fats}г
 🍞 Углеводы: ${plan.carbs}г
 💧 Вода: ${plan.water}л
-
 **Съедено:**
 🔥 ${consumed.calories} / ${plan.calories} ккал (${Math.round(consumed.calories / plan.calories * 100)}%)
 🥩 ${consumed.protein}г / ${plan.protein}г
 🥑 ${consumed.fats}г / ${plan.fats}г
 🍞 ${consumed.carbs}г / ${plan.carbs}г
-
 **Осталось:**
 🔥 ${plan.calories - consumed.calories} ккал
 🥩 ${plan.protein - consumed.protein}г белка
 🥑 ${plan.fats - consumed.fats}г жиров
 🍞 ${plan.carbs - consumed.carbs}г углеводов`
-
     // Добавляем список приемов пищи
     if (todayLogs && todayLogs.length > 0) {
       diaryText += '\n\n**📝 Приемы пищи:**'
@@ -3607,7 +3796,6 @@ async function showDiary(chatId: number, dbUserId: number) {
     await sendMessage(chatId, "❌ Ошибка загрузки дневника")
   }
 }
-
 /**
  * Онбординг для новых пользователей
  */
@@ -3636,7 +3824,6 @@ async function startOnboarding(chatId: number, userId: number) {
     await sendMessage(chatId, "❌ Ошибка. Переходим в главное меню.", getMainKeyboard())
   }
 }
-
 /**
  * Шаг 2 онбординга: Главное меню
  */
@@ -3658,7 +3845,6 @@ async function onboardingStep2(chatId: number, userId: number) {
     }
   )
 }
-
 /**
  * Шаг 3 онбординга: Запись еды
  */
@@ -3688,7 +3874,6 @@ async function onboardingStep3(chatId: number, userId: number) {
     }
   )
 }
-
 /**
  * Шаг 4 онбординга: Редактирование
  */
@@ -3710,7 +3895,6 @@ async function onboardingStep4(chatId: number, userId: number) {
     }
   )
 }
-
 /**
  * Шаг 5 онбординга: Настройки
  */
@@ -3735,7 +3919,6 @@ async function onboardingStep5(chatId: number, userId: number) {
     }
   )
 }
-
 /**
  * Шаг 6 онбординга: Советы и завершение
  */
@@ -3760,7 +3943,6 @@ async function onboardingStep6(chatId: number, userId: number) {
     }
   )
 }
-
 /**
  * Показать опции доната
  */
@@ -3794,7 +3976,6 @@ async function showDonationOptions(chatId: number, userId: number) {
     }
   )
 }
-
 /**
  * Создать платеж для доната
  */
@@ -3891,7 +4072,6 @@ async function createDonationPayment(chatId: number, dbUserId: number, amount: n
     await sendMessage(chatId, "❌ Ошибка создания платежа. Попробуй позже.")
   }
 }
-
 /**
  * Главная функция обработки обновлений
  */
@@ -3923,7 +4103,6 @@ async function handleUpdate(update: TelegramUpdate) {
     console.error('Error handling update:', error)
   }
 }
-
 /**
  * Главный обработчик HTTP запросов
  */
