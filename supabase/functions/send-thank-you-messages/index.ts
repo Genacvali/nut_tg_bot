@@ -69,22 +69,39 @@ serve(async (req) => {
 
     console.log("Starting to send thank you messages...");
 
-    // Получаем список пользователей с unlimited подпиской, которым нужно отправить сообщение
-    // (можно добавить флаг "thank_you_sent" в таблицу users чтобы не отправлять дважды)
+    // Получаем список подписок с unlimited статусом
+    const { data: subscriptions, error: subsError } = await supabase
+      .from("user_subscriptions")
+      .select("user_id")
+      .eq("is_unlimited", true)
+      .eq("status", "active");
+
+    if (subsError) {
+      throw new Error(`Failed to fetch subscriptions: ${subsError.message}`);
+    }
+
+    if (!subscriptions || subscriptions.length === 0) {
+      return new Response(
+        JSON.stringify({
+          success: true,
+          sent: 0,
+          failed: 0,
+          errors: [],
+          message: "No users found with unlimited subscription",
+        }),
+        {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        }
+      );
+    }
+
+    const userIds = subscriptions.map(s => s.user_id);
+
+    // Получаем данные пользователей
     const { data: users, error: usersError } = await supabase
       .from("users")
-      .select(`
-        id,
-        telegram_id,
-        username,
-        first_name,
-        user_subscriptions!inner (
-          is_unlimited,
-          is_active
-        )
-      `)
-      .eq("user_subscriptions.is_unlimited", true)
-      .eq("user_subscriptions.is_active", true);
+      .select("id, telegram_id, username, first_name")
+      .in("id", userIds);
 
     if (usersError) {
       throw new Error(`Failed to fetch users: ${usersError.message}`);

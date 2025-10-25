@@ -153,6 +153,27 @@ serve(async (req) => {
       Message: errorMessage,
     } = webhookBody;
 
+    // Проверяем текущий статус платежа ДО обновления
+    const { data: currentPayment, error: fetchError } = await supabase
+      .from("payment_intents")
+      .select("status")
+      .eq("order_id", OrderId)
+      .single();
+    
+    if (fetchError) {
+      console.error("Error fetching payment:", fetchError);
+      throw fetchError;
+    }
+    
+    const previousStatus = currentPayment?.status;
+    console.log(`Previous status: ${previousStatus}, New status: ${Status}`);
+    
+    // Если статус не изменился - пропускаем (дубликат webhook'а)
+    if (previousStatus === Status) {
+      console.log(`⏩ Status unchanged, skipping duplicate webhook`);
+      return new Response("OK", { status: 200 });
+    }
+
     // Обновляем статус платежа в БД
     const { data: updateResult, error: updateError } = await supabase.rpc(
       "update_payment_status",
@@ -171,7 +192,15 @@ serve(async (req) => {
       throw updateError;
     }
 
-    console.log(`✅ Payment status updated: ${Status}`);
+    console.log(`✅ Payment status updated: ${previousStatus} → ${Status}`);
+    
+    // Проверяем, нужно ли отправлять уведомление
+    // Пропускаем AUTHORIZED и промежуточные статусы чтобы избежать дубликатов
+    const notifiableStatuses = ['CONFIRMED', 'REJECTED', 'CANCELLED', 'REFUNDED'];
+    if (!notifiableStatuses.includes(Status)) {
+      console.log(`⏩ Skipping notification for status: ${Status}`);
+      return new Response("OK", { status: 200 });
+    }
 
     // Получаем информацию о платеже с telegram_id пользователя
     const { data: payment, error: paymentError } = await supabase
@@ -198,10 +227,11 @@ serve(async (req) => {
     const telegramChatId = payment.users?.telegram_id;
     if (!telegramChatId) {
       console.error("Telegram chat ID not found for user:", payment.user_id);
+      return new Response("OK", { status: 200 });
     }
 
     // Отправляем уведомление пользователю в зависимости от статуса
-    if (botToken) {
+    if (botToken && telegramChatId) {
       let notificationMessage = "";
       let keyboard: any = null;
 
@@ -243,14 +273,6 @@ serve(async (req) => {
             `Попробуй снова или выбери другой способ оплаты.`;
           
           keyboard = [[{ text: "🔄 Попробовать снова", callback_data: "buy_subscription" }]];
-          break;
-
-        case "AUTHORIZED":
-          // Платеж авторизован, ждем подтверждения
-          notificationMessage =
-            `⏳ **Платеж авторизован**\n\n` +
-            `Сейчас происходит финальная проверка.\n` +
-            `Подписка будет активирована автоматически через несколько секунд.`;
           break;
 
         case "REFUNDED":
