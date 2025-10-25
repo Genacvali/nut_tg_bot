@@ -939,14 +939,14 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
         `Никаких данных карт, никаких автоплатежей.\n\n` +
         `✨ Пользуйся **всеми функциями** бота совершенно бесплатно.\n\n` +
         `📅 После ${daysLeft} ${daysLeft === 1 ? 'дня' : daysLeft < 5 ? 'дней' : 'дней'} сможешь продолжить за:\n` +
-        `• 1 месяц — 99₽\n` +
-        `• 6 месяцев — 499₽ (выгодно!)\n` +
-        `• 1 год — 999₽ (супер выгодно!)\n\n` +
+        `• 1 месяц — 129₽\n` +
+        `• 6 месяцев — 649₽ (выгодно!)\n` +
+        `• 1 год — 1099₽ (супер выгодно!)\n\n` +
         `🚀 Начинай прямо сейчас!`
       
       await sendMessage(chatId, trialMessage, {
         inline_keyboard: [
-          [{ text: "🚀 Начать пользоваться", callback_data: "main_menu" }]
+          [{ text: "🚀 Начать пользоваться", callback_data: "start_onboarding" }]
         ]
       })
     } else {
@@ -1078,6 +1078,28 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
     await showDiary(chatId, user.id)
   }
   
+  // Онбординг для новых пользователей
+  else if (data === 'start_onboarding') {
+    await startOnboarding(chatId, userId)
+  }
+  
+  // Шаги онбординга
+  else if (data === 'onboarding_step_2') {
+    await onboardingStep2(chatId, userId)
+  }
+  else if (data === 'onboarding_step_3') {
+    await onboardingStep3(chatId, userId)
+  }
+  else if (data === 'onboarding_step_4') {
+    await onboardingStep4(chatId, userId)
+  }
+  else if (data === 'onboarding_step_5') {
+    await onboardingStep5(chatId, userId)
+  }
+  else if (data === 'onboarding_step_6') {
+    await onboardingStep6(chatId, userId)
+  }
+  
   // Главное меню
   else if (data === 'main_menu') {
     await clearUserState(userId) // Очищаем любое активное состояние
@@ -1097,6 +1119,33 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
   // Переключение уведомлений о воде
   else if (data === 'toggle_water_notifications') {
     await toggleNotifications(chatId, user.id, 'water')
+  }
+  
+  // Поддержать проект (донат)
+  else if (data === 'support_project') {
+    await showDonationOptions(chatId, userId)
+  }
+  
+  // Выбор суммы доната
+  else if (data.startsWith('donate_')) {
+    const amount = parseInt(data.split('_')[1])
+    await createDonationPayment(chatId, user.id, amount)
+  }
+  
+  // Кастомная сумма доната
+  else if (data === 'donate_custom') {
+    await setUserState(userId, 'entering_donation_amount', {})
+    await sendMessage(
+      chatId,
+      `💝 **Поддержать проект**\n\n` +
+      `Введи сумму, которую хочешь поддержать проект (от 50₽ до 10000₽):\n\n` +
+      `Например: 500`,
+      {
+        inline_keyboard: [
+          [{ text: "❌ Отмена", callback_data: "support_project" }]
+        ]
+      }
+    )
   }
   
   // Купить подписку
@@ -1136,7 +1185,7 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
         durationText = '1 месяц'
         description = 'Попробовать'
       } else if (plan.name === 'quarterly') {
-        durationText = '3 месяца'
+        durationText = '6 месяцев'
         description = 'Популярный'
       } else if (plan.name === 'yearly') {
         durationText = '1 год'
@@ -1882,6 +1931,20 @@ async function handleTextMessage(message: TelegramMessage) {
         [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
       ]
     })
+  }
+  
+  // Ввод суммы доната
+  else if (stateData.state === 'entering_donation_amount') {
+    if (!message.text) return
+    const amount = parseInt(message.text.replace(/\D/g, ''))
+    
+    if (isNaN(amount) || amount < 50 || amount > 10000) {
+      await sendMessage(message.chat.id, "❌ Пожалуйста, укажи сумму от 50₽ до 10000₽")
+      return
+    }
+    
+    await clearUserState(userId)
+    await createDonationPayment(message.chat.id, user.id, amount)
   }
   
   // Ручной ввод КБЖУ
@@ -2774,7 +2837,7 @@ ${subscriptionText}
 
   await sendMessage(chatId, helpText, {
     inline_keyboard: [
-      [{ text: "💝 Поддержать проект", callback_data: "buy_subscription" }],
+      [{ text: "💝 Поддержать проект", callback_data: "support_project" }],
       [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
     ]
   })
@@ -2956,7 +3019,7 @@ async function showSubscriptionMenu(chatId: number, dbUserId: number) {
       statusEmoji = '✅'
       keyboard = [
         [{ text: "🔄 Сменить план", callback_data: "buy_subscription" }],
-        [{ text: "💝 Поддержать проект", callback_data: "buy_subscription" }],
+        [{ text: "💝 Поддержать проект", callback_data: "support_project" }],
         [{ text: "🔙 Назад", callback_data: "cancel_action" }]
       ]
     }
@@ -3242,6 +3305,286 @@ async function showDiary(chatId: number, dbUserId: number) {
   } catch (error) {
     console.error('Error showing diary:', error)
     await sendMessage(chatId, "❌ Ошибка загрузки дневника")
+  }
+}
+
+/**
+ * Онбординг для новых пользователей
+ */
+async function startOnboarding(chatId: number, userId: number) {
+  try {
+    // Шаг 1: Приветствие и обзор
+    await sendMessage(
+      chatId,
+      `🎉 **Добро пожаловать в C.I.D.!**\n\n` +
+      `Я твой персональный AI-диетолог. Давай разберемся, как я работаю!\n\n` +
+      `📱 **Что я умею:**\n` +
+      `• Записывать твои приемы пищи\n` +
+      `• Анализировать КБЖУ\n` +
+      `• Давать советы по питанию\n` +
+      `• Составлять меню и рецепты\n\n` +
+      `🚀 **Начнем с основ!**`,
+      {
+        inline_keyboard: [
+          [{ text: "➡️ Далее", callback_data: "onboarding_step_2" }],
+          [{ text: "⏭️ Пропустить", callback_data: "main_menu" }]
+        ]
+      }
+    )
+  } catch (error) {
+    console.error('Error in onboarding:', error)
+    await sendMessage(chatId, "❌ Ошибка. Переходим в главное меню.", getMainKeyboard())
+  }
+}
+
+/**
+ * Шаг 2 онбординга: Главное меню
+ */
+async function onboardingStep2(chatId: number, userId: number) {
+  await sendMessage(
+    chatId,
+    `🏠 **Главное меню**\n\n` +
+    `Это твоя база! Отсюда ты можешь:\n\n` +
+    `📝 **Записать прием пищи** - просто напиши что съел\n` +
+    `📊 **Дневник** - посмотреть статистику за день\n` +
+    `⚙️ **Настройки** - изменить профиль и уведомления\n` +
+    `👤 **Профиль** - посмотреть свой план КБЖУ\n\n` +
+    `💡 **Совет:** Чаще всего ты будешь использовать запись еды!`,
+    {
+      inline_keyboard: [
+        [{ text: "➡️ Далее", callback_data: "onboarding_step_3" }],
+        [{ text: "⏭️ Пропустить", callback_data: "main_menu" }]
+      ]
+    }
+  )
+}
+
+/**
+ * Шаг 3 онбординга: Запись еды
+ */
+async function onboardingStep3(chatId: number, userId: number) {
+  await sendMessage(
+    chatId,
+    `🍽️ **Как записать прием пищи**\n\n` +
+    `**Способ 1:** Просто напиши в чат\n` +
+    `• "банан 150г, овсянка 60г"\n` +
+    `• "съел курицу с рисом"\n` +
+    `• "выпил кофе с молоком"\n\n` +
+    `**Способ 2:** Голосовое сообщение\n` +
+    `• Нажми микрофон и расскажи что съел\n` +
+    `• Я пойму и запишу!\n\n` +
+    `🤖 **Я автоматически:**\n` +
+    `• Подсчитаю калории и КБЖУ\n` +
+    `• Покажу детализацию по продуктам\n` +
+    `• Дам совет по питанию`,
+    {
+      inline_keyboard: [
+        [{ text: "➡️ Далее", callback_data: "onboarding_step_4" }],
+        [{ text: "⏭️ Пропустить", callback_data: "main_menu" }]
+      ]
+    }
+  )
+}
+
+/**
+ * Шаг 4 онбординга: Редактирование
+ */
+async function onboardingStep4(chatId: number, userId: number) {
+  await sendMessage(
+    chatId,
+    `✏️ **Редактирование записей**\n\n` +
+    `После записи еды ты увидишь кнопки:\n\n` +
+    `✏️ **Изменить** - исправить описание или вес\n` +
+    `🗑️ **Удалить** - убрать запись\n` +
+    `📊 **Статистика** - посмотреть дневник\n` +
+    `🍽️ **Записать еще** - добавить еще один прием\n\n` +
+    `💡 **Важно:** Всегда можно исправить ошибки!`,
+    {
+      inline_keyboard: [
+        [{ text: "➡️ Далее", callback_data: "onboarding_step_5" }],
+        [{ text: "⏭️ Пропустить", callback_data: "main_menu" }]
+      ]
+    }
+  )
+}
+
+/**
+ * Шаг 5 онбординга: Настройки
+ */
+async function onboardingStep5(chatId: number, userId: number) {
+  await sendMessage(
+    chatId,
+    `⚙️ **Настройки и профиль**\n\n` +
+    `**В настройках ты можешь:**\n` +
+    `• Изменить вес, рост, возраст\n` +
+    `• Пересчитать план КБЖУ\n` +
+    `• Настроить уведомления\n\n` +
+    `**В профиле увидишь:**\n` +
+    `• Свой план КБЖУ\n` +
+    `• Статистику за день\n` +
+    `• Информацию о подписке\n\n` +
+    `🎯 **Цель:** Следуй своему плану КБЖУ для достижения цели!`,
+    {
+      inline_keyboard: [
+        [{ text: "➡️ Далее", callback_data: "onboarding_step_6" }],
+        [{ text: "⏭️ Пропустить", callback_data: "main_menu" }]
+      ]
+    }
+  )
+}
+
+/**
+ * Шаг 6 онбординга: Советы и завершение
+ */
+async function onboardingStep6(chatId: number, userId: number) {
+  await sendMessage(
+    chatId,
+    `💡 **Полезные советы**\n\n` +
+    `**Для лучших результатов:**\n` +
+    `• Записывай еду сразу после приема\n` +
+    `• Указывай вес продуктов (150г, 200мл)\n` +
+    `• Не забывай про воду!\n` +
+    `• Задавай вопросы о питании\n\n` +
+    `**Если что-то непонятно:**\n` +
+    `• Нажми ❓ Помощь в главном меню\n` +
+    `• Просто напиши вопрос в чат\n\n` +
+    `🚀 **Готов начать?**`,
+    {
+      inline_keyboard: [
+        [{ text: "🎯 Начать пользоваться!", callback_data: "main_menu" }]
+      ]
+    }
+  )
+}
+
+/**
+ * Показать опции доната
+ */
+async function showDonationOptions(chatId: number, userId: number) {
+  await sendMessage(
+    chatId,
+    `💝 **Поддержать проект C.I.D.**\n\n` +
+    `Спасибо, что хочешь поддержать развитие бота!\n\n` +
+    `Твой донат поможет:\n` +
+    `• Оплачивать серверы и AI\n` +
+    `• Добавлять новые функции\n` +
+    `• Улучшать качество сервиса\n\n` +
+    `💰 **Выбери сумму или укажи свою:**`,
+    {
+      inline_keyboard: [
+        [
+          { text: "☕ 100₽", callback_data: "donate_100" },
+          { text: "🍕 300₽", callback_data: "donate_300" }
+        ],
+        [
+          { text: "🎁 500₽", callback_data: "donate_500" },
+          { text: "💎 1000₽", callback_data: "donate_1000" }
+        ],
+        [
+          { text: "✏️ Своя сумма", callback_data: "donate_custom" }
+        ],
+        [
+          { text: "❌ Отмена", callback_data: "main_menu" }
+        ]
+      ]
+    }
+  )
+}
+
+/**
+ * Создать платеж для доната
+ */
+async function createDonationPayment(chatId: number, dbUserId: number, amount: number) {
+  try {
+    console.log('createDonationPayment called with:', { chatId, dbUserId, amount, dbUserIdType: typeof dbUserId })
+    
+    await sendMessage(chatId, "⏳ Создаю счет на оплату...")
+    
+    // Генерируем уникальный order_id
+    const orderId = `donation_${dbUserId}_${Date.now()}`
+    
+    // Создаем платежное намерение в базе данных
+    const { data: paymentIntent, error } = await supabase
+      .from('payment_intents')
+      .insert({
+        user_id: dbUserId,
+        plan_id: null, // Для доната plan_id не нужен
+        order_id: orderId,
+        amount_rub: amount,
+        amount_kopeks: amount * 100,
+        description: `Поддержка проекта C.I.D. - ${amount}₽`,
+        status: 'NEW',
+        is_donation: true // Флаг доната
+      })
+      .select()
+      .single()
+    
+    if (error) {
+      console.error('Error creating donation payment intent:', error)
+      await sendMessage(chatId, "❌ Ошибка создания платежа. Попробуй позже.")
+      return
+    }
+    
+    // Вызываем функцию создания платежа через T-Bank
+    const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
+    const requestData = {
+      userId: Number(dbUserId),  // Убеждаемся что это число
+      amount_rub: amount,
+      order_id: orderId,
+      description: `Поддержка проекта C.I.D. - ${amount}₽`,
+      is_donation: true
+    }
+    
+    console.log('Sending donation request:', JSON.stringify(requestData, null, 2))
+    
+    const response = await fetch(`${SUPABASE_URL}/functions/v1/tbank-payment`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${Deno.env.get('SUPABASE_ANON_KEY')}`
+      },
+      body: JSON.stringify(requestData)
+    })
+    
+    if (!response.ok) {
+      const errorText = await response.text()
+      console.error('T-Bank payment HTTP error:', response.status, errorText)
+      await sendMessage(chatId, "❌ Ошибка создания платежа. Попробуй позже.")
+      return
+    }
+    
+    const paymentData = await response.json()
+    
+    if (paymentData.error) {
+      console.error('T-Bank payment error:', paymentData.error)
+      await sendMessage(chatId, "❌ Ошибка создания платежа. Попробуй позже.")
+      return
+    }
+    
+    if (!paymentData.payment_url) {
+      console.error('No payment URL in response:', paymentData)
+      await sendMessage(chatId, "❌ Ошибка создания платежа. Попробуй позже.")
+      return
+    }
+    
+    // Отправляем ссылку на оплату
+    await sendMessage(
+      chatId,
+      `💝 **Поддержка проекта - ${amount}₽**\n\n` +
+      `Спасибо за желание поддержать C.I.D.!\n\n` +
+      `🔒 **Безопасная оплата через T-Bank**\n` +
+      `✨ После оплаты ты получишь уведомление\n\n` +
+      `👇 Нажми кнопку ниже для оплаты:`,
+      {
+        inline_keyboard: [
+          [{ text: "💳 Оплатить", url: paymentData.payment_url }],
+          [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+        ]
+      }
+    )
+  } catch (error) {
+    console.error('Error creating donation payment:', error)
+    await sendMessage(chatId, "❌ Ошибка создания платежа. Попробуй позже.")
   }
 }
 

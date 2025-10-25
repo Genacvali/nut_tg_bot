@@ -240,29 +240,39 @@ serve(async (req) => {
 
       switch (Status) {
         case "CONFIRMED":
-          // Платеж успешен! Получаем информацию о новой подписке
-          const { data: subscriptionInfo } = await supabase.rpc('get_subscription_info', {
-            p_user_id: payment.user_id
-          })
-          
-          let expiresText = ''
-          if (subscriptionInfo && subscriptionInfo.expires_at) {
-            const expiresDate = new Date(subscriptionInfo.expires_at)
-            const formattedDate = expiresDate.toLocaleDateString('ru-RU', { 
-              day: 'numeric', 
-              month: 'long', 
-              year: 'numeric' 
+          // Проверяем, это донат или подписка
+          if (payment.is_donation) {
+            // Донат - благодарим за поддержку
+            notificationMessage =
+              `💝 **Огромное спасибо за поддержку!**\n\n` +
+              `🎉 Твой донат ${payment.amount_rub}₽ получен!\n\n` +
+              `Благодаря таким людям как ты, C.I.D. становится лучше каждый день!\n\n` +
+              `🙏 Мы очень ценим твою поддержку!`;
+          } else {
+            // Подписка - получаем информацию о новой подписке
+            const { data: subscriptionInfo } = await supabase.rpc('get_subscription_info', {
+              p_user_id: payment.user_id
             })
-            expiresText = `\n📅 **Активна до:** ${formattedDate}`
+            
+            let expiresText = ''
+            if (subscriptionInfo && subscriptionInfo.expires_at) {
+              const expiresDate = new Date(subscriptionInfo.expires_at)
+              const formattedDate = expiresDate.toLocaleDateString('ru-RU', { 
+                day: 'numeric', 
+                month: 'long', 
+                year: 'numeric' 
+              })
+              expiresText = `\n📅 **Активна до:** ${formattedDate}`
+            }
+            
+            notificationMessage =
+              `🎉 **Спасибо за поддержку!**\n\n` +
+              `💝 Оплата прошла успешно!\n` +
+              `📦 Подписка активирована\n` +
+              `💰 Сумма: ${payment.amount_rub}₽${expiresText}\n\n` +
+              `✅ Все функции бота разблокированы!\n` +
+              `Приятного пользования! 🚀`;
           }
-          
-          notificationMessage =
-            `🎉 **Спасибо за поддержку!**\n\n` +
-            `💝 Оплата прошла успешно!\n` +
-            `📦 Подписка активирована\n` +
-            `💰 Сумма: ${payment.amount_rub}₽${expiresText}\n\n` +
-            `✅ Все функции бота разблокированы!\n` +
-            `Приятного пользования! 🚀`;
           
           keyboard = [[{ text: "🏠 Главное меню", callback_data: "main_menu" }]];
           break;

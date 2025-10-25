@@ -20,21 +20,21 @@ UPDATE subscription_plans
 SET 
   price_usd = 1.36,  -- 129₽ / 95 курс (для справки)
   price_rub = 129.00
-WHERE name = '1 Month';
+WHERE name = 'monthly';
 
 UPDATE subscription_plans 
 SET 
-  name = '6 Months',
+  name = 'quarterly',
   duration_days = 180,
   price_usd = 6.83,  -- 649₽ / 95 курс
   price_rub = 649.00
-WHERE name = '3 Months';
+WHERE name = 'quarterly';
 
 UPDATE subscription_plans 
 SET 
   price_usd = 11.57,  -- 1099₽ / 95 курс
   price_rub = 1099.00
-WHERE name = '1 Year';
+WHERE name = 'yearly';
 
 -- 2. Таблица платежных намерений (Payment Intents)
 -- ============================================

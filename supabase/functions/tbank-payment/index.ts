@@ -68,13 +68,33 @@ serve(async (req) => {
     }
 
     // Получаем данные из запроса
-    const { userId, planId }: PaymentRequest = await req.json();
+    const requestBody = await req.json();
+    console.log('Request body:', JSON.stringify(requestBody, null, 2));
+    
+    const { userId, planId, amount_rub, order_id, description, is_donation } = requestBody;
 
-    if (!userId || !planId) {
-      throw new Error("Missing userId or planId");
+    console.log('Parsed values:', { 
+      userId, 
+      userIdType: typeof userId, 
+      planId, 
+      amount_rub, 
+      order_id, 
+      description, 
+      is_donation 
+    });
+
+    if (!userId) {
+      console.error('Missing userId in request:', requestBody);
+      throw new Error("Missing userId");
+    }
+    
+    // Для доната не нужен planId
+    if (!is_donation && !planId) {
+      console.error('Missing planId for subscription:', requestBody);
+      throw new Error("Missing planId");
     }
 
-    console.log(`Creating payment for user ${userId}, plan ${planId}`);
+    console.log(`Creating payment for user ${userId}`, is_donation ? `donation ${amount_rub}₽` : `plan ${planId}`);
 
     // Инициализируем Supabase клиент
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
@@ -90,39 +110,56 @@ serve(async (req) => {
       throw new Error("T-Bank credentials not configured");
     }
 
-    // Получаем информацию о плане
-    const { data: plan, error: planError } = await supabase
-      .from("subscription_plans")
-      .select("*")
-      .eq("id", planId)
-      .single();
+    let plan: any = null;
+    let amountRub: number;
+    let paymentDescription: string;
+    let finalOrderId: string;
 
-    if (planError || !plan) {
-      throw new Error(`Plan not found: ${planId}`);
-    }
+    if (is_donation) {
+      // Для доната используем переданные данные
+      amountRub = amount_rub;
+      paymentDescription = description || `Поддержка проекта C.I.D. - ${amount_rub}₽`;
+      finalOrderId = order_id;
+      console.log(`Donation: ${amountRub}₽`);
+    } else {
+      // Получаем информацию о плане
+      const { data: planData, error: planError } = await supabase
+        .from("subscription_plans")
+        .select("*")
+        .eq("id", planId)
+        .single();
 
-    // Генерируем уникальный OrderId
-    const orderId = `${userId}_${planId}_${Date.now()}`;
-
-    // Создаем платежное намерение в БД
-    const { data: paymentIntent, error: piError } = await supabase.rpc(
-      "create_payment_intent",
-      {
-        p_user_id: userId,
-        p_plan_id: planId,
-        p_order_id: orderId,
+      if (planError || !planData) {
+        throw new Error(`Plan not found: ${planId}`);
       }
-    );
 
-    if (piError) {
-      console.error("Error creating payment intent:", piError);
-      throw new Error(`Failed to create payment intent: ${piError.message}`);
+      plan = planData;
+      amountRub = plan.price_rub;
+      paymentDescription = `Подписка C.I.D. (${plan.name === 'monthly' ? '1 месяц' : plan.name === 'quarterly' ? '6 месяцев' : '1 год'})`;
+
+      // Генерируем уникальный OrderId
+      finalOrderId = `${userId}_${planId}_${Date.now()}`;
+
+      // Создаем платежное намерение в БД
+      const { data: paymentIntent, error: piError } = await supabase.rpc(
+        "create_payment_intent",
+        {
+          p_user_id: userId,
+          p_plan_id: planId,
+          p_order_id: finalOrderId,
+        }
+      );
+
+      if (piError) {
+        console.error("Error creating payment intent:", piError);
+        throw new Error(`Failed to create payment intent: ${piError.message}`);
+      }
+
+      console.log(`Payment intent created: ${paymentIntent}`);
     }
-
-    console.log(`Payment intent created: ${paymentIntent}`);
 
     // Конвертируем сумму в копейки (T-Bank требует!)
-    const amountKopeks = Math.round(plan.price_rub * 100);
+    const amountKopeks = Math.round(amountRub * 100);
 
     // URLs для редиректа
     // Используем официальные страницы T-Bank с автоматическим редиректом в бот
@@ -135,7 +172,7 @@ serve(async (req) => {
       Taxation: "usn_income", // УСН доход (упрощенная система налогообложения)
       Items: [
         {
-          Name: `Подписка C.I.D. (${plan.name === 'monthly' ? '1 месяц' : plan.name === 'quarterly' ? '6 месяцев' : '1 год'})`,
+          Name: paymentDescription,
           Price: amountKopeks, // Цена в копейках
           Quantity: 1.00,
           Amount: amountKopeks, // Сумма = Price * Quantity
@@ -156,8 +193,8 @@ serve(async (req) => {
     const initParams: Record<string, any> = {
       TerminalKey: terminalKey,
       Amount: amountKopeks,
-      OrderId: orderId,
-      Description: `Подписка C.I.D.: ${plan.name}`,
+      OrderId: finalOrderId,
+      Description: paymentDescription,
       Receipt: receipt, // Добавляем чек!
       NotificationURL: notificationUrl, // URL для webhook уведомлений
       SuccessURL: successUrl,
@@ -167,13 +204,13 @@ serve(async (req) => {
 
     // Генерируем Token (подпись)
     const token = await generateToken(initParams, password);
-    const requestBody = {
+    const tbankRequestBody = {
       ...initParams,
       Token: token,
     };
 
     console.log("Calling T-Bank Init API...");
-    console.log("Request body:", JSON.stringify(requestBody, null, 2));
+    console.log("Request body:", JSON.stringify(tbankRequestBody, null, 2));
 
     // Отправляем запрос к T-Bank
     const tbankResponse = await fetch(`${TBANK_API_URL}/Init`, {
@@ -181,7 +218,7 @@ serve(async (req) => {
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(requestBody),
+      body: JSON.stringify(tbankRequestBody),
     });
 
     const tbankData = await tbankResponse.json();
