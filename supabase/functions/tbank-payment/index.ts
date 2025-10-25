@@ -135,7 +135,7 @@ serve(async (req) => {
       Taxation: "usn_income", // УСН доход (упрощенная система налогообложения)
       Items: [
         {
-          Name: `Подписка C.I.D. (${plan.name === 'monthly' ? '1 месяц' : plan.name === 'quarterly' ? '3 месяца' : '1 год'})`,
+          Name: `Подписка C.I.D. (${plan.name === 'monthly' ? '1 месяц' : plan.name === 'quarterly' ? '6 месяцев' : '1 год'})`,
           Price: amountKopeks, // Цена в копейках
           Quantity: 1.00,
           Amount: amountKopeks, // Сумма = Price * Quantity

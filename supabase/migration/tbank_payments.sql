@@ -5,7 +5,7 @@
 -- Webhook автоматически активирует подписку после оплаты
 -- ============================================
 
--- 1. Обновляем цены подписок (199₽, 499₽, 1990₽)
+-- 1. Обновляем цены подписок (129₽, 649₽, 1099₽)
 -- ============================================
 
 -- Добавляем поля для цен (если их нет)
@@ -18,20 +18,22 @@ ADD COLUMN IF NOT EXISTS price_rub DECIMAL(10,2);
 -- Обновляем цены
 UPDATE subscription_plans 
 SET 
-  price_usd = 2.10,  -- 199₽ / 95 курс (для справки)
-  price_rub = 199.00
+  price_usd = 1.36,  -- 129₽ / 95 курс (для справки)
+  price_rub = 129.00
 WHERE name = '1 Month';
 
 UPDATE subscription_plans 
 SET 
-  price_usd = 5.25,  -- 499₽ / 95 курс
-  price_rub = 499.00
+  name = '6 Months',
+  duration_days = 180,
+  price_usd = 6.83,  -- 649₽ / 95 курс
+  price_rub = 649.00
 WHERE name = '3 Months';
 
 UPDATE subscription_plans 
 SET 
-  price_usd = 20.95,  -- 1990₽ / 95 курс
-  price_rub = 1990.00
+  price_usd = 11.57,  -- 1099₽ / 95 курс
+  price_rub = 1099.00
 WHERE name = '1 Year';
 
 -- 2. Таблица платежных намерений (Payment Intents)

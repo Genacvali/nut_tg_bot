@@ -231,7 +231,10 @@ serve(async (req) => {
     }
 
     // Отправляем уведомление пользователю в зависимости от статуса
-    if (botToken && telegramChatId) {
+    // ВАЖНО: Отправляем уведомление только если статус изменился (чтобы избежать дублей)
+    const statusChanged = payment.status !== Status;
+    
+    if (botToken && telegramChatId && statusChanged) {
       let notificationMessage = "";
       let keyboard: any = null;
 
