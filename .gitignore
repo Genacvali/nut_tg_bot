@@ -22,3 +22,12 @@ supabase/.temp/
 # Build
 dist/
 build/
+README.md
+supabase/functions/admin-bot/get-user-id.ts
+supabase/functions/admin-bot/index.ts
+supabase/functions/admin-bot/QUICK-START.md
+supabase/functions/admin-bot/README.md
+supabase/functions/admin-bot/test-setup.sql
+supabase/functions/admin-bot/TROUBLESHOOTING.md
+supabase/functions/set-admin-webhook/index.ts
+supabase/migration/add_admin_bot_support.sql
