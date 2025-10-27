@@ -1552,7 +1552,34 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
         await sendMessage(chatId, "❌ Ошибка сохранения. Попробуй еще раз.")
         return
       }
-      
+
+      // 🔥 STREAK SYSTEM: Обновляем streak пользователя
+      let streakInfo: any = null
+      try {
+        const { data: streakData, error: streakError } = await supabase
+          .rpc('update_user_streak', { p_user_id: user.id })
+          .single()
+
+        if (!streakError && streakData) {
+          streakInfo = streakData
+          console.log(`✅ Streak updated for user ${user.id}:`, streakInfo)
+        }
+      } catch (error) {
+        console.error('Error updating streak:', error)
+      }
+
+      // Формируем streak информацию
+      let streakText = ''
+      if (streakInfo) {
+        streakText = `\n\n🔥 **Streak: ${streakInfo.current_streak} ${streakInfo.current_streak === 1 ? 'день' : streakInfo.current_streak < 5 ? 'дня' : 'дней'}!**`
+        if (streakInfo.is_new_record) {
+          streakText += ` 🎉 Новый рекорд!`
+        }
+        if (streakInfo.earned_achievements && streakInfo.earned_achievements.length > 0) {
+          streakText += `\n\n🏆 **Новые достижения:**\n${streakInfo.earned_achievements.join('\n')}`
+        }
+      }
+
       await clearUserState(userId)
       await sendMessage(
         chatId,
@@ -1561,7 +1588,8 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
         `🔥 Калории: ${analysis.total.calories} ккал\n` +
         `🥩 Белки: ${analysis.total.protein}г\n` +
         `🧈 Жиры: ${analysis.total.fats}г\n` +
-        `🍞 Углеводы: ${analysis.total.carbs}г\n\n` +
+        `🍞 Углеводы: ${analysis.total.carbs}г` +
+        `${streakText}\n\n` +
         `⚠️ Помни: это примерная оценка!`,
         {
           inline_keyboard: [
@@ -1767,6 +1795,60 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
   }
   
   // Quick actions
+  // 🌟 QUICK LOG: Показать шаблоны
+  else if (data === 'quick_log') {
+    try {
+      const { data: templates, error } = await supabase
+        .rpc('get_user_meal_templates', {
+          p_user_id: user.id,
+          p_limit: 10
+        })
+
+      if (error) throw error
+
+      if (!templates || templates.length === 0) {
+        await sendMessage(
+          chatId,
+          `⭐ **Быстрый лог**\n\n` +
+          `У тебя пока нет сохраненных шаблонов.\n\n` +
+          `💡 Залогируй еду и нажми "⭐ В избранное" чтобы создать шаблон!`,
+          {
+            inline_keyboard: [
+              [{ text: "🍽 Записать прием пищи", callback_data: "quick_log_food" }],
+              [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+            ]
+          }
+        )
+        return
+      }
+
+      let templatesList = `⚡ **Быстрый лог**\n\n`
+      templatesList += `Выбери блюдо для быстрого логирования:\n\n`
+
+      const keyboard: any[] = []
+
+      templates.forEach((template: any, index: number) => {
+        const calories = Math.round(template.calories)
+        templatesList += `${template.emoji} **${template.template_name}**\n`
+        templatesList += `   🔥 ${calories} ккал | Б:${template.protein}г Ж:${template.fats}г У:${template.carbs}г\n\n`
+
+        keyboard.push([{
+          text: `${template.emoji} ${template.template_name} (${calories} ккал)`,
+          callback_data: `use_template_${template.id}`
+        }])
+      })
+
+      keyboard.push([{ text: "🍽 Записать новое", callback_data: "quick_log_food" }])
+      keyboard.push([{ text: "🏠 Главное меню", callback_data: "main_menu" }])
+
+      await sendMessage(chatId, templatesList, { inline_keyboard: keyboard })
+
+    } catch (error) {
+      console.error('Error getting templates:', error)
+      await sendMessage(chatId, "❌ Ошибка загрузки шаблонов")
+    }
+  }
+
   else if (data === 'quick_log_food') {
     await setUserState(userId, 'logging_food', {})
     await sendMessage(
@@ -1818,7 +1900,63 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
     const mealId = parseInt(data.split('_')[2])
     await deleteMeal(chatId, user.id, mealId)
   }
-  
+
+  // 🌟 QUICK LOG: Использовать шаблон
+  else if (data.startsWith('use_template_')) {
+    const templateId = parseInt(data.split('_')[2])
+
+    try {
+      await sendMessage(chatId, "⏳ Логирую...")
+
+      const { data: result, error } = await supabase
+        .rpc('use_meal_template', {
+          p_user_id: user.id,
+          p_template_id: templateId
+        })
+
+      if (error || !result.success) {
+        throw new Error(result?.error || 'Unknown error')
+      }
+
+      // Обновляем streak
+      let streakInfo: any = null
+      try {
+        const { data: streakData } = await supabase
+          .rpc('update_user_streak', { p_user_id: user.id })
+          .single()
+        if (streakData) streakInfo = streakData
+      } catch (e) {
+        console.error('Error updating streak:', e)
+      }
+
+      // Формируем streak информацию
+      let streakText = ''
+      if (streakInfo) {
+        streakText = `\n\n🔥 **Streak: ${streakInfo.current_streak} ${streakInfo.current_streak === 1 ? 'день' : streakInfo.current_streak < 5 ? 'дня' : 'дней'}!**`
+        if (streakInfo.is_new_record) streakText += ` 🎉 Новый рекорд!`
+        if (streakInfo.earned_achievements && streakInfo.earned_achievements.length > 0) {
+          streakText += `\n\n🏆 **Новые достижения:**\n${streakInfo.earned_achievements.join('\n')}`
+        }
+      }
+
+      const resultText = `✅ **Прием пищи записан!**\n\n` +
+        `⭐ **${result.template_name}**\n\n` +
+        `🔥 ${Math.round(result.calories)} ккал | 🥩 Б: ${result.protein}г | 🥑 Ж: ${result.fats}г | 🍞 У: ${result.carbs}г${streakText}`
+
+      await sendMessage(chatId, resultText, {
+        inline_keyboard: [
+          [{ text: "⚡ Еще раз", callback_data: "quick_log" }],
+          [{ text: "📊 Статистика", callback_data: "diary" }],
+          [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+        ]
+      })
+
+    } catch (error) {
+      console.error('Error using template:', error)
+      await sendMessage(chatId, "❌ Ошибка логирования. Попробуй еще раз.")
+    }
+  }
+
   // Подтверждение удаления приема пищи
   else if (data.startsWith('confirm_delete_meal_')) {
     const mealId = parseInt(data.split('_')[3])
@@ -1826,9 +1964,27 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
   }
   
   // Редактирование приема пищи
+  // 🌟 QUICK LOG: Сохранить в избранное
+  else if (data.startsWith('save_template_')) {
+    const mealId = parseInt(data.split('_')[2])
+    await setUserState(userId, 'saving_template', { mealId })
+    await sendMessage(
+      chatId,
+      `⭐ **Сохранение в избранное**\n\n` +
+      `Как назвать этот шаблон?\n` +
+      `Например: "Мой завтрак", "Стандартный обед", "Перекус"\n\n` +
+      `💡 Шаблоны помогут быстро логировать частые блюда!`,
+      {
+        inline_keyboard: [
+          [{ text: "❌ Отмена", callback_data: "cancel_action" }]
+        ]
+      }
+    )
+  }
+
   else if (data.startsWith('edit_meal_')) {
     const mealId = parseInt(data.split('_')[2])
-    
+
     // Получаем информацию о приеме
     const { data: meal } = await supabase
       .from('food_logs')
@@ -1836,7 +1992,7 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
       .eq('id', mealId)
       .eq('user_id', user.id)
       .single()
-    
+
     if (meal) {
       await setUserState(userId, 'editing_meal', { mealId: mealId, originalDescription: meal.description })
       await sendMessage(
@@ -2348,7 +2504,53 @@ async function handleTextMessage(message: TelegramMessage) {
     if (!message.text) return
     await handleMealEdit(userId, message.chat.id, user.id, stateData.data.mealId, message.text)
   }
-  
+
+  // 🌟 QUICK LOG: Сохранение шаблона
+  else if (stateData.state === 'saving_template') {
+    if (!message.text) return
+
+    const templateName = message.text.trim()
+    if (templateName.length < 2 || templateName.length > 50) {
+      await sendMessage(message.chat.id, "❌ Название должно быть от 2 до 50 символов. Попробуй еще раз.")
+      return
+    }
+
+    await sendMessage(message.chat.id, "⏳ Сохраняю в избранное...")
+
+    try {
+      const { data: result, error } = await supabase
+        .rpc('create_meal_template_from_log', {
+          p_user_id: user.id,
+          p_food_log_id: stateData.data.mealId,
+          p_template_name: templateName,
+          p_emoji: '⭐'
+        })
+
+      if (error || !result.success) {
+        throw new Error(result?.error || 'Unknown error')
+      }
+
+      await sendMessage(
+        message.chat.id,
+        `✅ **Шаблон сохранен!**\n\n` +
+        `⭐ **"${templateName}"**\n\n` +
+        `Теперь ты можешь быстро логировать это блюдо через "⚡ Быстрый лог"`,
+        {
+          inline_keyboard: [
+            [{ text: "⚡ Быстрый лог", callback_data: "quick_log" }],
+            [{ text: "📊 Статистика", callback_data: "diary" }],
+            [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+          ]
+        }
+      )
+
+      await clearUserState(userId)
+    } catch (error) {
+      console.error('Error saving template:', error)
+      await sendMessage(message.chat.id, "❌ Ошибка сохранения шаблона. Попробуй еще раз.")
+    }
+  }
+
   // Редактирование веса
   else if (stateData.state === 'editing_weight') {
     if (!message.text) return
@@ -2945,7 +3147,23 @@ async function handleFoodLogging(userId: number, chatId: number, dbUserId: numbe
     if (saveError) {
       throw saveError
     }
-    
+
+    // 🔥 STREAK SYSTEM: Обновляем streak пользователя
+    let streakInfo: any = null
+    try {
+      const { data: streakData, error: streakError } = await supabase
+        .rpc('update_user_streak', { p_user_id: dbUserId })
+        .single()
+
+      if (!streakError && streakData) {
+        streakInfo = streakData
+        console.log(`✅ Streak updated for user ${dbUserId}:`, streakInfo)
+      }
+    } catch (error) {
+      console.error('Error updating streak:', error)
+      // Не падаем если streak не обновился - это не критично
+    }
+
     // Формируем детализацию по продуктам
     let breakdownText = ''
     if (analysis.breakdown && analysis.breakdown.length > 0) {
@@ -2958,20 +3176,38 @@ async function handleFoodLogging(userId: number, chatId: number, dbUserId: numbe
     
     const now = new Date()
     const timeStr = now.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
-    
+
+    // Формируем streak информацию
+    let streakText = ''
+    if (streakInfo) {
+      streakText = `\n\n🔥 **Streak: ${streakInfo.current_streak} ${streakInfo.current_streak === 1 ? 'день' : streakInfo.current_streak < 5 ? 'дня' : 'дней'}!**`
+
+      if (streakInfo.is_new_record) {
+        streakText += ` 🎉 Новый рекорд!`
+      }
+
+      // Добавляем новые достижения
+      if (streakInfo.earned_achievements && streakInfo.earned_achievements.length > 0) {
+        streakText += `\n\n🏆 **Новые достижения:**\n${streakInfo.earned_achievements.join('\n')}`
+      }
+    }
+
     const resultText = `✅ **Прием пищи записан!**
 📝 ${foodDescription}
 🔥 ${analysis.calories} ккал | 🥩 Б: ${analysis.protein}г | 🥑 Ж: ${analysis.fats}г | 🍞 У: ${analysis.carbs}г${breakdownText}
 ⏰ ${timeStr}
-💬 ${analysis.comment}
+💬 ${analysis.comment}${streakText}
 💡 **Совет:** В следующий раз можешь просто 📸 сфотографировать еду!`
     
-    // Post-action buttons: редактировать, удалить, статистика
+    // Post-action buttons: редактировать, удалить, в избранное, статистика
     await sendMessage(chatId, resultText, {
       inline_keyboard: [
         [
           { text: "✏️ Изменить", callback_data: `edit_meal_${savedLog.id}` },
           { text: "🗑 Удалить", callback_data: `delete_meal_${savedLog.id}` }
+        ],
+        [
+          { text: "⭐ В избранное", callback_data: `save_template_${savedLog.id}` }
         ],
         [
           { text: "📊 Статистика", callback_data: "diary" }
@@ -3798,7 +4034,35 @@ async function showProfileMenu(chatId: number, dbUserId: number) {
       profileText += `🍞 Углеводы: ${plan.carbs} г\n`
       profileText += `💧 Вода: ${Math.round(plan.water * 1000)} мл\n\n`
     }
-    
+
+    // 🔥 STREAK SYSTEM: Получаем статистику streak
+    try {
+      const { data: streakStats, error: streakError } = await supabase
+        .rpc('get_user_streak_stats', { p_user_id: dbUserId })
+        .single()
+
+      if (!streakError && streakStats) {
+        profileText += `🔥 **Твой Streak:**\n`
+        profileText += `• Текущий: **${streakStats.current_streak}** ${streakStats.current_streak === 1 ? 'день' : streakStats.current_streak < 5 ? 'дня' : 'дней'}\n`
+        profileText += `• Рекорд: **${streakStats.longest_streak}** ${streakStats.longest_streak === 1 ? 'день' : streakStats.longest_streak < 5 ? 'дня' : 'дней'}\n`
+        profileText += `• Всего логов: **${streakStats.total_logs}**\n`
+
+        if (streakStats.is_at_risk && streakStats.current_streak > 0) {
+          profileText += `\n⚠️ Streak в опасности! Не забудь залогировать еду сегодня!\n`
+        }
+
+        // Показываем достижения если есть
+        if (streakStats.achievements && streakStats.achievements.length > 0) {
+          const achievementsCount = streakStats.achievements.length
+          profileText += `\n🏆 Достижений: **${achievementsCount}**\n`
+        }
+
+        profileText += `\n`
+      }
+    } catch (error) {
+      console.error('Error getting streak stats:', error)
+    }
+
     // Получаем информацию о подписке
     const subscriptionData = await getSubscriptionInfo(dbUserId)
     const subscriptionInfo = Array.isArray(subscriptionData) ? subscriptionData[0] : subscriptionData
