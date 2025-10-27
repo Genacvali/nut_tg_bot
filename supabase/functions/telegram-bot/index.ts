@@ -49,9 +49,29 @@ const TELEGRAM_BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN')!
 const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY')!
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`
-async function detectIntent(text: string): Promise<'food' | 'question'> {
+async function detectIntent(text: string): Promise<'food' | 'water' | 'question'> {
   const lowerText = text.toLowerCase().trim()
-  
+
+  // 💧 ПРИОРИТЕТ 0: Детекция воды (специфичный case)
+  const waterPatterns = [
+    /\d+\s*(л|литр|мл|миллилитр)/i,  // Цифры с единицами измерения жидкости
+    /(выпил|выпила|попил|попила|пью|пьёт)\s+(вод|жидкост)/i,  // Глаголы питья + вода
+    /^\s*(вод|жидкост)/i,  // Начинается с "вода"
+    /(стакан|бутылк|кружк|чашк)\s+(вод|жидкост)/i,  // Емкости с водой
+    /^\d+\s*(л|литр|мл)\s*(вод|жидкост)?/i  // Начинается с количества литров/мл
+  ]
+
+  for (const pattern of waterPatterns) {
+    if (pattern.test(lowerText)) {
+      // Но проверяем что это не про другую жидкость с калориями (молоко, сок)
+      const hasCaloriesDrinks = /(молок|сок|смузи|кефир|йогурт|протеин|коктейл)/i.test(lowerText)
+      if (!hasCaloriesDrinks) {
+        console.log('Water intake detected:', text)
+        return 'water'
+      }
+    }
+  }
+
   // 🔥 ПРИОРИТЕТ 1: Анафоры и контекстные вопросы (ссылки на предыдущий контекст)
   const anaphoraPatterns = [
     /(про какой|про какую|про какое|про этот|про эту|про то)/i,
@@ -2313,6 +2333,122 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
       await sendMessage(chatId, "❌ Ошибка генерации списка покупок. Попробуй позже.")
     }
   }
+
+  // 💧 WATER: Логирование воды (кнопки быстрого выбора)
+  else if (data.startsWith('log_water_')) {
+    const amountMl = parseInt(data.split('_')[2])
+
+    try {
+      const { data: result, error } = await supabase
+        .rpc('log_water_intake', {
+          p_user_id: user.id,
+          p_amount_ml: amountMl,
+          p_note: null
+        })
+
+      if (error || !result.success) {
+        throw new Error('Failed to log water')
+      }
+
+      const todayTotalL = (result.today_total_ml / 1000).toFixed(1)
+      const targetL = (result.target_ml / 1000).toFixed(1)
+      const remainingL = (result.remaining_ml / 1000).toFixed(1)
+      const progressPercent = result.progress_percent
+
+      let progressBar = ''
+      const filledSegments = Math.floor(progressPercent / 10)
+      for (let i = 0; i < 10; i++) {
+        progressBar += i < filledSegments ? '💧' : '⚪'
+      }
+
+      let messageText = `✅ **Вода записана!**\n\n`
+      messageText += `💧 **+${amountMl} мл**\n\n`
+      messageText += `📊 **Прогресс:**\n${progressBar} ${progressPercent}%\n\n`
+      messageText += `💧 Выпито: **${todayTotalL}л** / ${targetL}л\n`
+
+      if (result.remaining_ml > 0) {
+        messageText += `📌 Осталось: **${remainingL}л**`
+      } else {
+        messageText += `🎉 **Цель достигнута!**`
+      }
+
+      await sendMessage(chatId, messageText, {
+        inline_keyboard: [
+          [
+            { text: "💧 Еще воды", callback_data: "quick_log_water" },
+            { text: "📊 Статистика", callback_data: "water_stats" }
+          ],
+          [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+        ]
+      })
+    } catch (error) {
+      console.error('Error logging water:', error)
+      await sendMessage(chatId, "❌ Ошибка записи воды")
+    }
+  }
+
+  // 💧 WATER: Быстрое логирование (показать кнопки выбора)
+  else if (data === 'quick_log_water') {
+    await sendMessage(
+      chatId,
+      `💧 **Сколько воды выпил?**\n\nВыбери количество:`,
+      {
+        inline_keyboard: [
+          [
+            { text: "250 мл", callback_data: "log_water_250" },
+            { text: "500 мл", callback_data: "log_water_500" }
+          ],
+          [
+            { text: "1 литр", callback_data: "log_water_1000" },
+            { text: "1.5 литра", callback_data: "log_water_1500" }
+          ],
+          [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+        ]
+      }
+    )
+  }
+
+  // 💧 WATER: Статистика воды
+  else if (data === 'water_stats') {
+    try {
+      const { data: stats } = await supabase
+        .rpc('get_water_stats_today', { p_user_id: user.id })
+
+      if (stats) {
+        const todayTotalL = (stats.today_total_ml / 1000).toFixed(1)
+        const targetL = (stats.target_ml / 1000).toFixed(1)
+        const progressPercent = stats.progress_percent
+
+        let progressBar = ''
+        const filledSegments = Math.floor(progressPercent / 10)
+        for (let i = 0; i < 10; i++) {
+          progressBar += i < filledSegments ? '💧' : '⚪'
+        }
+
+        let messageText = `💧 **Статистика воды за сегодня**\n\n`
+        messageText += `${progressBar} ${progressPercent}%\n\n`
+        messageText += `💧 Выпито: **${todayTotalL}л** / ${targetL}л\n`
+        messageText += `📊 Логов: ${stats.logs_count}\n\n`
+
+        if (stats.is_goal_reached) {
+          messageText += `🎉 **Цель достигнута!** Отлично!`
+        } else {
+          const remainingL = (stats.remaining_ml / 1000).toFixed(1)
+          messageText += `📌 Осталось: **${remainingL}л**`
+        }
+
+        await sendMessage(chatId, messageText, {
+          inline_keyboard: [
+            [{ text: "💧 Добавить воду", callback_data: "quick_log_water" }],
+            [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+          ]
+        })
+      }
+    } catch (error) {
+      console.error('Error getting water stats:', error)
+      await sendMessage(chatId, "❌ Ошибка получения статистики")
+    }
+  }
 }
 /**
  * Обработка текстовых сообщений
@@ -2373,10 +2509,14 @@ async function handleTextMessage(message: TelegramMessage) {
     
     const intent = await detectIntent(message.text)
     console.log('Detected intent:', intent, 'for message:', message.text)
-    
+
     if (intent === 'food') {
       // Автоматически записываем еду
       await handleFoodLogging(userId, message.chat.id, user.id, message.text, 0)
+      return
+    } else if (intent === 'water') {
+      // Логируем воду
+      await handleWaterLogging(userId, message.chat.id, user.id, message.text)
       return
     } else {
       // Показываем заглушку с предложением перейти в Диалог
@@ -3232,6 +3372,116 @@ async function handleParameterEdit(userId: number, chatId: number, dbUserId: num
 /**
  * Запись приема пищи
  */
+/**
+ * Обработка логирования воды
+ */
+async function handleWaterLogging(userId: number, chatId: number, dbUserId: number, text: string) {
+  try {
+    await sendMessage(chatId, "💧 Логирую воду...")
+
+    // Парсим количество из текста
+    const lowerText = text.toLowerCase()
+
+    let amountMl = 0
+
+    // Ищем миллилитры
+    const mlMatch = lowerText.match(/(\d+)\s*(мл|миллилитр)/i)
+    if (mlMatch) {
+      amountMl = parseInt(mlMatch[1])
+    }
+
+    // Ищем литры
+    const literMatch = lowerText.match(/(\d+(?:[.,]\d+)?)\s*(л|литр)/i)
+    if (literMatch && amountMl === 0) {
+      const liters = parseFloat(literMatch[1].replace(',', '.'))
+      amountMl = Math.round(liters * 1000)
+    }
+
+    // Ищем стандартные емкости
+    if (amountMl === 0) {
+      if (/(стакан|стак)/i.test(lowerText)) amountMl = 250
+      else if (/(бутылк)/i.test(lowerText)) amountMl = 500
+      else if (/(кружк|чашк)/i.test(lowerText)) amountMl = 300
+    }
+
+    // Если не нашли количество - запрашиваем
+    if (amountMl === 0 || amountMl > 5000) {
+      await sendMessage(
+        chatId,
+        `💧 **Сколько воды ты выпил?**\n\n` +
+        `Укажи количество:\n` +
+        `• В миллилитрах: "500 мл"\n` +
+        `• В литрах: "1.5 л"\n` +
+        `• Или просто: "стакан", "бутылка"`,
+        {
+          inline_keyboard: [
+            [
+              { text: "250 мл", callback_data: "log_water_250" },
+              { text: "500 мл", callback_data: "log_water_500" }
+            ],
+            [
+              { text: "1 литр", callback_data: "log_water_1000" },
+              { text: "1.5 литра", callback_data: "log_water_1500" }
+            ],
+            [{ text: "❌ Отмена", callback_data: "cancel_action" }]
+          ]
+        }
+      )
+      return
+    }
+
+    // Логируем воду
+    const { data: result, error } = await supabase
+      .rpc('log_water_intake', {
+        p_user_id: dbUserId,
+        p_amount_ml: amountMl,
+        p_note: null
+      })
+
+    if (error || !result.success) {
+      throw new Error('Failed to log water')
+    }
+
+    // Формируем сообщение
+    const todayTotalL = (result.today_total_ml / 1000).toFixed(1)
+    const targetL = (result.target_ml / 1000).toFixed(1)
+    const remainingL = (result.remaining_ml / 1000).toFixed(1)
+    const progressPercent = result.progress_percent
+
+    let progressBar = ''
+    const filledSegments = Math.floor(progressPercent / 10)
+    for (let i = 0; i < 10; i++) {
+      progressBar += i < filledSegments ? '💧' : '⚪'
+    }
+
+    let messageText = `✅ **Вода записана!**\n\n`
+    messageText += `💧 **+${amountMl} мл**\n\n`
+    messageText += `📊 **Прогресс за сегодня:**\n`
+    messageText += `${progressBar} ${progressPercent}%\n\n`
+    messageText += `💧 Выпито: **${todayTotalL}л** / ${targetL}л\n`
+
+    if (result.remaining_ml > 0) {
+      messageText += `📌 Осталось: **${remainingL}л**`
+    } else {
+      messageText += `🎉 **Цель достигнута!** Отличная работа!`
+    }
+
+    await sendMessage(chatId, messageText, {
+      inline_keyboard: [
+        [
+          { text: "💧 Еще воды", callback_data: "quick_log_water" },
+          { text: "📊 Статистика", callback_data: "water_stats" }
+        ],
+        [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+      ]
+    })
+
+  } catch (error) {
+    console.error('Error logging water:', error)
+    await sendMessage(chatId, "❌ Ошибка записи воды. Попробуй еще раз.")
+  }
+}
+
 async function handleFoodLogging(userId: number, chatId: number, dbUserId: number, foodDescription: string, clarificationAttempt: number = 0) {
   try {
     await sendMessage(chatId, "⏳ Анализирую твой прием пищи...")

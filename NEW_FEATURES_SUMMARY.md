@@ -144,7 +144,11 @@
    - Создает таблицу weight_logs
    - Создает функции log_weight, get_weight_stats, get_weight_history
 
-4. **`supabase/migration/phase2_optimize_queries.sql`** (опционально, если еще не применена)
+4. **`supabase/migration/add_broadcast_helpers.sql`**
+   - Создает функции get_users_with_active_subscription, get_broadcast_stats
+   - Для массовых рассылок
+
+5. **`supabase/migration/phase2_optimize_queries.sql`** (опционально, если еще не применена)
    - Создает VIEW user_full_context
    - Создает функции get_user_full_context
 
@@ -154,6 +158,7 @@
 3. **`supabase/functions/weekly-ai-report/index.ts`** - еженедельные отчеты
 4. **`supabase/functions/progress-charts/index.ts`** - генерация графиков
 5. **`supabase/functions/shopping-list/index.ts`** - списки покупок
+6. **`supabase/functions/broadcast-message/index.ts`** - массовая рассылка обновлений
 
 ### Настройка Cron Jobs (в Supabase Dashboard → Database → Cron):
 1. **Smart Notifications** - каждый час:
@@ -517,6 +522,7 @@ WHERE routine_name = 'create_meal_template_from_log';
 - [ ] Применена миграция `add_streak_system.sql`
 - [ ] Применена миграция `add_meal_templates.sql`
 - [ ] Применена миграция `add_weight_tracking.sql`
+- [ ] Применена миграция `add_broadcast_helpers.sql`
 - [ ] Применена миграция `phase2_optimize_queries.sql`
 
 ### Edge Functions:
@@ -525,6 +531,7 @@ WHERE routine_name = 'create_meal_template_from_log';
 - [ ] Задеплоен `weekly-ai-report/index.ts`
 - [ ] Задеплоен `progress-charts/index.ts`
 - [ ] Задеплоен `shopping-list/index.ts`
+- [ ] Задеплоен `broadcast-message/index.ts`
 
 ### Cron Jobs:
 - [ ] Настроен cron для smart-notifications (каждый час)
@@ -539,6 +546,8 @@ WHERE routine_name = 'create_meal_template_from_log';
 - [ ] Протестирован список покупок (3, 7, 14 дней)
 - [ ] Проверены smart notifications (в нужное время)
 - [ ] Проверен weekly report (воскресенье)
+- [ ] Протестирована broadcast функция (на себе)
+- [ ] Отправлена рассылка об обновлениях пользователям
 - [ ] Проверены логи Edge Functions (нет ошибок)
 - [ ] Запущен мониторинг SQL запросов
 
@@ -550,9 +559,10 @@ WHERE routine_name = 'create_meal_template_from_log';
 
 **Всего добавлено:**
 - ✅ 7 крупных фич
-- ✅ 4 SQL миграции
-- ✅ 5 Edge Functions (1 обновлена, 4 новых)
+- ✅ 5 SQL миграций
+- ✅ 6 Edge Functions (1 обновлена, 5 новых)
 - ✅ 2 Cron Jobs
+- ✅ 1 Broadcast система для рассылок
 - ✅ 10+ новых кнопок в UI
 - ✅ Множество новых callback handlers и state handlers
 
