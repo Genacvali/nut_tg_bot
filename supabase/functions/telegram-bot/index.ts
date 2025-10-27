@@ -463,6 +463,244 @@ async function checkSubscriptionAccess(dbUserId: number): Promise<boolean> {
     return false
   }
 }
+
+// ============================================
+// RATE LIMITING & CACHE HELPERS
+// ============================================
+
+/**
+ * Проверка rate limit для пользователя
+ */
+async function checkRateLimit(dbUserId: number, maxRequests: number = 30, windowMinutes: number = 1): Promise<{allowed: boolean, remaining: number, retryAfter?: number}> {
+  try {
+    const { data, error } = await supabase
+      .rpc('check_rate_limit', {
+        p_user_id: dbUserId,
+        p_max_requests: maxRequests,
+        p_window_minutes: windowMinutes
+      })
+
+    if (error) {
+      console.error('Error checking rate limit:', error)
+      // Если функция не работает - разрешаем запрос (fail open)
+      return { allowed: true, remaining: maxRequests }
+    }
+
+    return {
+      allowed: data.allowed,
+      remaining: data.remaining,
+      retryAfter: data.retry_after
+    }
+  } catch (error) {
+    console.error('Exception checking rate limit:', error)
+    // Fail open
+    return { allowed: true, remaining: maxRequests }
+  }
+}
+
+/**
+ * Генерация ключа кеша
+ */
+function generateCacheKey(type: string, data: any): string {
+  // Простой hash - можно улучшить с crypto
+  const jsonString = JSON.stringify(data).toLowerCase().trim()
+  let hash = 0
+  for (let i = 0; i < jsonString.length; i++) {
+    const char = jsonString.charCodeAt(i)
+    hash = ((hash << 5) - hash) + char
+    hash = hash & hash // Convert to 32bit integer
+  }
+  return `${type}_${Math.abs(hash)}`
+}
+
+/**
+ * Получить данные из кеша
+ */
+async function getFromCache(cacheKey: string): Promise<any | null> {
+  try {
+    const { data, error } = await supabase
+      .rpc('get_from_cache', {
+        p_cache_key: cacheKey
+      })
+
+    if (error || !data) {
+      return null
+    }
+
+    console.log(`✅ Cache HIT for key: ${cacheKey}`)
+    return data
+  } catch (error) {
+    console.error('Error getting from cache:', error)
+    return null
+  }
+}
+
+/**
+ * Сохранить данные в кеш
+ */
+async function saveToCache(
+  cacheKey: string,
+  cacheType: string,
+  requestData: any,
+  responseData: any,
+  ttlSeconds: number = 2592000 // 30 дней по умолчанию
+): Promise<void> {
+  try {
+    const { error } = await supabase
+      .rpc('save_to_cache', {
+        p_cache_key: cacheKey,
+        p_cache_type: cacheType,
+        p_request_data: requestData,
+        p_response_data: responseData,
+        p_ttl_seconds: ttlSeconds
+      })
+
+    if (error) {
+      console.error('Error saving to cache:', error)
+    } else {
+      console.log(`💾 Cache SAVE for key: ${cacheKey}`)
+    }
+  } catch (error) {
+    console.error('Exception saving to cache:', error)
+  }
+}
+
+/**
+ * Fetch с timeout
+ */
+async function fetchWithTimeout(
+  url: string,
+  options: any,
+  timeout: number = 30000
+): Promise<Response> {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeout)
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal
+    })
+    return response
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
+
+/**
+ * OpenAI запрос с retry и timeout
+ */
+async function callOpenAIWithRetry(
+  url: string,
+  options: any,
+  maxRetries: number = 3,
+  timeout: number = 30000
+): Promise<any> {
+  let lastError: any
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`🤖 OpenAI API call attempt ${attempt}/${maxRetries}`)
+
+      const response = await fetchWithTimeout(url, options, timeout)
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        throw new Error(`OpenAI API error: ${response.status} - ${errorText}`)
+      }
+
+      const data = await response.json()
+      console.log(`✅ OpenAI API call successful`)
+      return data
+
+    } catch (error: any) {
+      lastError = error
+      console.error(`❌ OpenAI API call attempt ${attempt} failed:`, error.message)
+
+      // Если это последняя попытка или ошибка не temporary - бросаем
+      if (attempt === maxRetries) {
+        throw error
+      }
+
+      // Exponential backoff: 1s, 2s, 4s
+      const delay = 1000 * Math.pow(2, attempt - 1)
+      console.log(`⏳ Retrying in ${delay}ms...`)
+      await new Promise(resolve => setTimeout(resolve, delay))
+    }
+  }
+
+  throw lastError
+}
+
+// ============================================
+// END OF RATE LIMITING & CACHE HELPERS
+// ============================================
+
+// ============================================
+// PHASE 2: USER CONTEXT OPTIMIZATION
+// ============================================
+
+/**
+ * Получение полного контекста пользователя одним запросом (PHASE 2 оптимизация)
+ * Заменяет 4-5 отдельных запросов на 1 запрос через VIEW
+ * @param telegramId - Telegram ID пользователя
+ * @returns Полный контекст пользователя или null при ошибке
+ */
+async function getUserFullContext(telegramId: number): Promise<any | null> {
+  try {
+    const { data, error } = await supabase
+      .rpc('get_user_full_context', { p_telegram_id: telegramId })
+
+    if (error) {
+      console.error('❌ Error getting user full context:', error)
+      return null
+    }
+
+    if (!data) {
+      console.warn('⚠️ No context found for telegram_id:', telegramId)
+      return null
+    }
+
+    console.log(`✅ Got user full context for ${telegramId} (user_id: ${data.user?.id})`)
+    return data
+  } catch (error) {
+    console.error('❌ Exception in getUserFullContext:', error)
+    return null
+  }
+}
+
+/**
+ * Получение полного контекста пользователя по user_id (PHASE 2 оптимизация)
+ * @param userId - Internal user_id из БД
+ * @returns Полный контекст пользователя или null при ошибке
+ */
+async function getUserFullContextById(userId: number): Promise<any | null> {
+  try {
+    const { data, error } = await supabase
+      .rpc('get_user_full_context_by_id', { p_user_id: userId })
+
+    if (error) {
+      console.error('❌ Error getting user full context by id:', error)
+      return null
+    }
+
+    if (!data) {
+      console.warn('⚠️ No context found for user_id:', userId)
+      return null
+    }
+
+    console.log(`✅ Got user full context for user_id ${userId}`)
+    return data
+  } catch (error) {
+    console.error('❌ Exception in getUserFullContextById:', error)
+    return null
+  }
+}
+
+// ============================================
+// END OF USER CONTEXT OPTIMIZATION
+// ============================================
+
 /**
  * Отправка сообщения в Telegram
  */
@@ -1089,21 +1327,11 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
   
   // Показать карточку
   else if (data === 'show_card') {
-    const { data: profile } = await supabase
-      .from('user_profiles')
-      .select('*')
-      .eq('user_id', user.id)
-      .single()
-    
-    const { data: plan } = await supabase
-      .from('nutrition_plans')
-      .select('*')
-      .eq('user_id', user.id)
-      .eq('is_active', true)
-      .single()
-    
-    if (plan && profile) {
-      const cardText = formatNutritionCard(plan, profile)
+    // ⚡ PHASE 2 OPTIMIZATION: 1 запрос вместо 2
+    const context = await getUserFullContextById(user.id)
+
+    if (context?.plan && context?.profile) {
+      const cardText = formatNutritionCard(context.plan, context.profile)
       await editMessageText(chatId, messageId, cardText, nutritionCardKeyboard())
     } else {
       await editMessageText(chatId, messageId, "⚠️ План еще не создан. Заполни профиль!")
@@ -1648,14 +1876,11 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
   // Пересчет плана КБЖУ
   else if (data === 'recalculate_nutrition') {
     await sendMessage(chatId, "⏳ Пересчитываю твой план...")
-    
-    // Получаем профиль
-    const { data: profile } = await supabase
-      .from('user_profiles')
-      .select('*')
-      .eq('user_id', user.id)
-      .single()
-    
+
+    // ⚡ PHASE 2 OPTIMIZATION: используем getUserFullContextById
+    const context = await getUserFullContextById(user.id)
+    const profile = context?.profile
+
     if (profile) {
       try {
         // Генерируем новый план
@@ -2027,21 +2252,13 @@ async function handleTextMessage(message: TelegramMessage) {
   else if (stateData.state === 'waiting_adjustment') {
     if (!message.text) return
     await sendMessage(message.chat.id, "⏳ Корректирую план...")
-    
+
     try {
-      const { data: profile } = await supabase
-        .from('user_profiles')
-        .select('*')
-        .eq('user_id', user.id)
-        .single()
-      
-      const { data: currentPlan } = await supabase
-        .from('nutrition_plans')
-        .select('*')
-        .eq('user_id', user.id)
-        .eq('is_active', true)
-        .single()
-      
+      // ⚡ PHASE 2 OPTIMIZATION: 1 запрос вместо 2
+      const context = await getUserFullContextById(user.id)
+      const profile = context?.profile
+      const currentPlan = context?.plan
+
       const adjusted = await adjustNutritionPlan(currentPlan, message.text, profile)
       
       // Формируем текст корректировки с датой
@@ -2777,9 +2994,25 @@ async function handleFoodLogging(userId: number, chatId: number, dbUserId: numbe
 async function handleRecipeRequest(userId: number, chatId: number, dbUserId: number, request: string, messageId?: number) {
   try {
     console.log(`🤖 handleRecipeRequest called for user ${dbUserId}`)
+
+    // ⚡ RATE LIMITING CHECK
+    const rateLimit = await checkRateLimit(dbUserId, 30, 1) // 30 запросов в минуту
+    if (!rateLimit.allowed) {
+      console.warn(`🚫 Rate limit exceeded for user ${dbUserId}. Retry after ${rateLimit.retryAfter}s`)
+      await sendMessage(
+        chatId,
+        `⏱ Слишком много запросов! Пожалуйста, подожди ${rateLimit.retryAfter} секунд.\n\nЭто защита от спама для всех пользователей. 🙏`,
+        undefined,
+        'Markdown',
+        messageId
+      )
+      return
+    }
+    console.log(`✅ Rate limit OK. Remaining: ${rateLimit.remaining}/30`)
+
     // Отправляем "думающее" сообщение как reply на сообщение пользователя
     await sendMessage(chatId, "🤔 Думаю...", undefined, 'Markdown', messageId)
-    
+
     // 1. Извлекаем предпочтения из текущего запроса и сохраняем их
     console.log(`🔍 Extracting preferences from text: "${request}"`)
     const extractedPrefs = await extractPreferencesFromText(request)
@@ -3032,22 +3265,67 @@ ${userPreferences.length > 0 ? `
     messages.push({ role: 'user', content: request })
     console.log(`📨 Total messages sent to OpenAI: ${messages.length} (1 system + ${chatHistory.length} history + 1 current)`)
 
-    // 10. Отправляем запрос в OpenAI
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${OPENAI_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'gpt-4o-mini',
-        messages: messages,
-        temperature: 0.7, // Понижено для более точной обработки контекста
-        max_tokens: 2500 // Увеличено для полноценных развернутых ответов с рационами
+    // 10. Проверяем кеш (только для простых запросов без истории)
+    let recommendation: string = ''
+    let cacheHit = false
+
+    // Кешируем только простые запросы без сложного контекста
+    const shouldCache = chatHistory.length === 0 && request.length < 200
+    let cacheKey = ''
+
+    if (shouldCache) {
+      // Генерируем ключ кеша на основе запроса и базовой информации
+      cacheKey = generateCacheKey('recipe', {
+        request: request.toLowerCase().trim(),
+        calories: plan?.calories || 0,
+        preferences: userPreferences.map(p => p.item).sort()
       })
-    })
-    const data = await response.json()
-    const recommendation = data.choices[0].message.content
+
+      // Проверяем кеш
+      const cachedResponse = await getFromCache(cacheKey)
+      if (cachedResponse) {
+        recommendation = cachedResponse
+        cacheHit = true
+        console.log(`💰 CACHE HIT! Saved OpenAI call for: "${request.substring(0, 50)}..."`)
+      }
+    }
+
+    // Если нет в кеше - вызываем OpenAI с retry
+    if (!cacheHit) {
+      console.log(`🌐 CACHE MISS - calling OpenAI API...`)
+
+      const data = await callOpenAIWithRetry(
+        'https://api.openai.com/v1/chat/completions',
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${OPENAI_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: 'gpt-4o-mini',
+            messages: messages,
+            temperature: 0.7, // Понижено для более точной обработки контекста
+            max_tokens: 2500 // Увеличено для полноценных развернутых ответов с рационами
+          })
+        },
+        3, // maxRetries
+        30000 // timeout 30s
+      )
+
+      recommendation = data.choices[0].message.content
+
+      // Сохраняем в кеш (если это был простой запрос)
+      if (shouldCache && cacheKey) {
+        await saveToCache(
+          cacheKey,
+          'recipe',
+          { request, calories: plan?.calories, preferences: userPreferences.map(p => p.item) },
+          recommendation,
+          86400 // TTL 24 часа для рецептов (они меняются реже)
+        )
+      }
+    }
 
     // 11. Сохраняем сообщения в историю диалога
     console.log(`💾 Saving user message to chat history (length: ${request.length} chars)`)
@@ -3489,20 +3767,11 @@ ${subscriptionText}
  */
 async function showProfileMenu(chatId: number, dbUserId: number) {
   try {
-    // Получаем профиль и план
-    const { data: profile } = await supabase
-      .from('user_profiles')
-      .select('*')
-      .eq('user_id', dbUserId)
-      .single()
-    
-    const { data: plan } = await supabase
-      .from('nutrition_plans')
-      .select('*')
-      .eq('user_id', dbUserId)
-      .eq('is_active', true)
-      .single()
-    
+    // ⚡ PHASE 2 OPTIMIZATION: 1 запрос вместо 2
+    const context = await getUserFullContextById(dbUserId)
+    const profile = context?.profile
+    const plan = context?.plan
+
     if (!profile) {
       await sendMessage(chatId, "❌ Профиль не найден. Заполни профиль через /start")
       return
