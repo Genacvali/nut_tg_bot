@@ -466,18 +466,22 @@ async function checkSubscriptionAccess(dbUserId: number): Promise<boolean> {
 /**
  * Отправка сообщения в Telegram
  */
-async function sendMessage(chatId: number, text: string, replyMarkup?: any, parseMode: string = 'Markdown'): Promise<any> {
+async function sendMessage(chatId: number, text: string, replyMarkup?: any, parseMode: string = 'Markdown', replyToMessageId?: number): Promise<any> {
   const payload: any = {
     chat_id: chatId,
     text: text
   }
-  
+
   if (parseMode) {
     payload.parse_mode = parseMode
   }
-  
+
   if (replyMarkup) {
     payload.reply_markup = replyMarkup
+  }
+
+  if (replyToMessageId) {
+    payload.reply_to_message_id = replyToMessageId
   }
   
   console.log('Sending message to chat:', chatId, 'length:', text.length, 'parse_mode:', parseMode)
@@ -2119,7 +2123,7 @@ async function handleTextMessage(message: TelegramMessage) {
   // Запрос рецепта
   else if (stateData.state === 'requesting_recipe') {
     if (!message.text) return
-    await handleRecipeRequest(userId, message.chat.id, user.id, message.text)
+    await handleRecipeRequest(userId, message.chat.id, user.id, message.text, message.message_id)
   }
   
   // Редактирование приема пищи
@@ -2770,10 +2774,11 @@ async function handleFoodLogging(userId: number, chatId: number, dbUserId: numbe
 /**
  * Обработка запроса рецепта
  */
-async function handleRecipeRequest(userId: number, chatId: number, dbUserId: number, request: string) {
+async function handleRecipeRequest(userId: number, chatId: number, dbUserId: number, request: string, messageId?: number) {
   try {
     console.log(`🤖 handleRecipeRequest called for user ${dbUserId}`)
-    await sendMessage(chatId, "🤔 Думаю...")
+    // Отправляем "думающее" сообщение как reply на сообщение пользователя
+    await sendMessage(chatId, "🤔 Думаю...", undefined, 'Markdown', messageId)
     
     // 1. Извлекаем предпочтения из текущего запроса и сохраняем их
     console.log(`🔍 Extracting preferences from text: "${request}"`)
@@ -2793,8 +2798,8 @@ async function handleRecipeRequest(userId: number, chatId: number, dbUserId: num
     const userPreferences = await getUserPreferences(dbUserId)
     console.log(`User has ${userPreferences.length} saved preferences`)
     
-    // 3. Получаем историю диалога (последние 10 сообщений)
-    const chatHistory = await getChatHistory(dbUserId, 10)
+    // 3. Получаем историю диалога (последние 30 сообщений для полноценного контекста)
+    const chatHistory = await getChatHistory(dbUserId, 30)
     console.log(`📚 Chat history loaded: ${chatHistory.length} messages`)
     
     // 4. Получаем план и записи за сегодня
@@ -2848,32 +2853,89 @@ async function handleRecipeRequest(userId: number, chatId: number, dbUserId: num
       }
     }
     
-    // 6. Извлекаем ПОСЛЕДНИЙ ответ ассистента для анализа контекста
-    const lastAssistantMessage = chatHistory.length > 0 
+    // 6. ДЕТЕКТОР КОРРЕКТИРОВОК - анализируем последние сообщения пользователя на наличие исключений/замен
+    const recentUserMessages = chatHistory.filter(msg => msg.role === 'user').slice(-5) // Последние 5 сообщений пользователя
+    const excludedProducts: string[] = []
+    const replacements: Array<{from: string, to: string}> = []
+
+    for (const msg of recentUserMessages) {
+      // Детектим исключения: "убери X", "без X", "не хочу X", "не люблю X"
+      const excludePatterns = [
+        /убер[иь]\s+([а-яё]+)/gi,
+        /без\s+([а-яё]+)/gi,
+        /не\s+(?:хочу|люблю|ем)\s+([а-яё]+)/gi
+      ]
+
+      for (const pattern of excludePatterns) {
+        const matches = [...msg.content.matchAll(pattern)]
+        for (const match of matches) {
+          if (match[1]) {
+            excludedProducts.push(match[1])
+          }
+        }
+      }
+
+      // Детектим замены: "замени X на Y", "вместо X дай Y"
+      const replaceMatch = msg.content.match(/замен[иь]\s+([а-яё]+)(?:\s+на\s+([а-яё]+))?/i)
+      if (replaceMatch) {
+        if (replaceMatch[2]) {
+          replacements.push({ from: replaceMatch[1], to: replaceMatch[2] })
+        } else {
+          excludedProducts.push(replaceMatch[1])
+        }
+      }
+    }
+
+    console.log(`🔍 Detected exclusions:`, excludedProducts)
+    console.log(`🔍 Detected replacements:`, replacements)
+
+    // 7. Извлекаем ВСЮ историю для анализа контекста
+    const lastAssistantMessage = chatHistory.length > 0
       ? chatHistory.slice().reverse().find(msg => msg.role === 'assistant')
       : null
-    
+
     let contextAnalysis = ''
+
+    // КРИТИЧЕСКИ ВАЖНО: Если есть исключения или запрос "пришли всё", добавляем ЖИРНОЕ ПРЕДУПРЕЖДЕНИЕ
+    const isRequestingFullPlan = request.toLowerCase().match(/(пришли|покажи|дай).*(весь|всё|полн|целиком|рацион|план)/i)
+
+    if ((excludedProducts.length > 0 || replacements.length > 0) && isRequestingFullPlan) {
+      contextAnalysis = `\n\n🚨🚨🚨 КРИТИЧЕСКИ ВАЖНО - ПОЛЬЗОВАТЕЛЬ ЗАПРОСИЛ ПОЛНЫЙ ПЛАН С УЧЕТОМ КОРРЕКТИРОВОК! 🚨🚨🚨
+
+⛔ ИСКЛЮЧЕННЫЕ ПРОДУКТЫ (НИКОГДА НЕ ИСПОЛЬЗУЙ ИХ):
+${excludedProducts.length > 0 ? excludedProducts.map(p => `- ${p}`).join('\n') : '- нет'}
+
+🔄 ЗАМЕНЫ ПРОДУКТОВ:
+${replacements.length > 0 ? replacements.map(r => `- ${r.from} → ${r.to}`).join('\n') : '- нет'}
+
+📋 ЧТО ДЕЛАТЬ:
+1. Найди ПОЛНЫЙ план питания из своих предыдущих сообщений (ищи 🕐 и приемы пищи)
+2. УДАЛИ все продукты из списка исключенных
+3. ПРИМЕНИ все замены из списка
+4. Покажи ВЕСЬ скорректированный план целиком
+5. НЕ СОЗДАВАЙ новый план! Используй старый с корректировками!
+
+`
+    }
+
     if (lastAssistantMessage) {
-      contextAnalysis = `\n\n🔍 ВАЖНО - АНАЛИЗ ПРЕДЫДУЩЕГО КОНТЕКСТА:
+      // Проверяем, был ли составлен план в предыдущих сообщениях
+      const hasMealPlan = lastAssistantMessage.content.includes('🕐') && lastAssistantMessage.content.includes('📊 Итого')
+
+      contextAnalysis += `\n🔍 АНАЛИЗ ПРЕДЫДУЩЕГО КОНТЕКСТА:
+${hasMealPlan ? '⚠️ В ПРЕДЫДУЩИХ СООБЩЕНИЯХ ТЫ УЖЕ СОСТАВИЛ ПЛАН ПИТАНИЯ!' : ''}
+
 ТВОЙ ПОСЛЕДНИЙ ОТВЕТ содержал:
-${lastAssistantMessage.content.substring(0, 800)}${lastAssistantMessage.content.length > 800 ? '...' : ''}
+${lastAssistantMessage.content.substring(0, 1200)}${lastAssistantMessage.content.length > 1200 ? '...' : ''}
 
-🚨 ПЕРЕД ОТВЕТОМ:
-1. ОБЯЗАТЕЛЬНО проверь свой предыдущий ответ выше
-2. Если пользователь спрашивает "про какой X", "что за X", "какой X" - ищи X в своем предыдущем ответе
-3. НИКОГДА не говори "я не упоминал", пока не проверишь предыдущий ответ
-4. Если нашел упоминание - отвечай конкретно про этот объект из предыдущего плана
-5. Если в предыдущем ответе был ПЛАН на день - все вопросы относятся к этому плану
-
-ПРИМЕРЫ ПРАВИЛЬНОЙ ОБРАБОТКИ:
-- "Про какой острый соус?" → Проверяю предыдущий ответ → Вижу "острый соус" в 18:00 и 21:00 → Отвечаю про него
-- "Какой рецепт?" → Проверяю → Вижу рецепт в плане → Даю детали
-- "Расскажи подробнее" → Проверяю → Расширяю информацию из предыдущего ответа
+🚨 ОБЯЗАТЕЛЬНЫЕ ПРАВИЛА:
+1. ПРОВЕРЬ всю историю диалога - там могут быть корректировки!
+2. Если пользователь спрашивает "про какой X" - ищи X в предыдущих ответах
+3. НИКОГДА не отрицай упоминание, если оно есть в истории!
 `
     }
     
-    // 7. Составляем системное сообщение с контекстом
+    // 8. Составляем системное сообщение с контекстом
     const systemMessage = `Ты - C.I.D., AI-диетолог. Помогаешь клиенту с питанием.
 📊 ИНФОРМАЦИЯ О КЛИЕНТЕ:
 Дневной план: ${plan?.calories || 'не установлен'} ккал (Б: ${plan?.protein || 0}г, Ж: ${plan?.fats || 0}г, У: ${plan?.carbs || 0}г)
@@ -2901,7 +2963,9 @@ ${userPreferences.length > 0 ? `
 - Пример: "Мед замени" → замени ТОЛЬКО мед на альтернативу, не переписывай весь план
 - Пример: "Авокадо тоже убери" → убери ТОЛЬКО авокадо, оставь остальное
 - Покажи только ИЗМЕНЕННЫЙ прием пищи с новыми КБЖУ
-- Если пользователь явно просит "распиши план", "дай меню" - тогда составь полный план
+- **КРИТИЧЕСКИ ВАЖНО**: Если после корректировок пользователь просит "пришли всё целиком", "покажи полностью", "весь план" - НЕ создавай НОВЫЙ план!
+  ОБЯЗАТЕЛЬНО возьми ВСЕ приемы пищи из СВОИХ ПРЕДЫДУЩИХ сообщений в истории диалога, примени ВСЕ корректировки (замены/удаления) и покажи ОБНОВЛЕННЫЙ план с учетом ВСЕХ изменений
+- Если пользователь явно просит "новый план", "другой рацион", "распиши заново" - только тогда составь полностью новый план
 
 📏 ИЗМЕНЕНИЕ ПОРЦИЙ:
 - "Давай порции увеличим" / "Побольше" / "Увеличь порции" → УВЕЛИЧЬ порции всех блюд на 20-30%
@@ -2951,20 +3015,24 @@ ${userPreferences.length > 0 ? `
 🔥 500 ккал (Б: 60г, Ж: 15г, У: 30г)
 📊 Итого: 900 ккал`
     
-    // 7. Формируем массив сообщений с историей
+    // 9. Формируем массив сообщений с историей
     const messages: Array<{role: string, content: string}> = [
       { role: 'system', content: systemMessage }
     ]
-    
+
     // Добавляем историю диалога
     if (chatHistory.length > 0) {
       messages.push(...chatHistory)
+      console.log(`📝 Added ${chatHistory.length} history messages to context`)
+    } else {
+      console.log('📝 No chat history found - starting fresh conversation')
     }
-    
+
     // Добавляем текущий запрос пользователя
     messages.push({ role: 'user', content: request })
-    
-    // 8. Отправляем запрос в OpenAI
+    console.log(`📨 Total messages sent to OpenAI: ${messages.length} (1 system + ${chatHistory.length} history + 1 current)`)
+
+    // 10. Отправляем запрос в OpenAI
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -2975,17 +3043,19 @@ ${userPreferences.length > 0 ? `
         model: 'gpt-4o-mini',
         messages: messages,
         temperature: 0.7, // Понижено для более точной обработки контекста
-        max_tokens: 1500
+        max_tokens: 2500 // Увеличено для полноценных развернутых ответов с рационами
       })
     })
     const data = await response.json()
     const recommendation = data.choices[0].message.content
-    
-    // 9. Сохраняем сообщения в историю диалога
+
+    // 11. Сохраняем сообщения в историю диалога
+    console.log(`💾 Saving user message to chat history (length: ${request.length} chars)`)
     await saveChatMessage(dbUserId, 'user', request)
+    console.log(`💾 Saving assistant response to chat history (length: ${recommendation.length} chars)`)
     await saveChatMessage(dbUserId, 'assistant', recommendation)
-    
-    // 10. Отправляем ответ пользователю с кнопкой главного меню
+
+    // 12. Отправляем ответ пользователю с кнопкой главного меню (как reply на его сообщение)
     await sendMessage(chatId, `📋 ${recommendation}`, {
       inline_keyboard: [
         [
@@ -2995,14 +3065,14 @@ ${userPreferences.length > 0 ? `
           }
         ]
       ]
-    })
+    }, 'Markdown', messageId)
     
     // НЕ очищаем state - пользователь остается в режиме диалога
     // Он может просто продолжить писать, диалог идет непрерывно
     // Выход через кнопку "🔙 Назад" или "🏠 Главное меню" на клавиатуре
   } catch (error) {
     console.error('Error handling recipe request:', error)
-    await sendMessage(chatId, "❌ Ошибка. Попробуй еще раз.")
+    await sendMessage(chatId, "❌ Ошибка. Попробуй еще раз.", undefined, 'Markdown', messageId)
   }
 }
 /**
