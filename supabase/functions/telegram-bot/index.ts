@@ -1023,6 +1023,10 @@ function getMainKeyboard() {
         { text: "📊 Дневник" }
       ],
       [
+        { text: "🛒 Список покупок" },
+        { text: "📈 Мой прогресс" }
+      ],
+      [
         { text: "⚙️ Настройки" },
         { text: "❓ Помощь" }
       ]
@@ -2174,6 +2178,141 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
       activityKeyboard()
     )
   }
+
+  // 📊 CHARTS: Показать график калорий
+  else if (data === 'chart_calories' || data === 'show_charts') {
+    try {
+      await sendMessage(chatId, "⏳ Генерирую график...")
+
+      // Вызываем Edge Function для генерации графика
+      const response = await fetch(`${SUPABASE_URL}/functions/v1/progress-charts`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`
+        },
+        body: JSON.stringify({
+          userId: user.id,
+          chatId: chatId,
+          chartType: 'calories',
+          days: 30
+        })
+      })
+
+      if (!response.ok) {
+        throw new Error('Failed to generate chart')
+      }
+    } catch (error) {
+      console.error('Error generating chart:', error)
+      await sendMessage(chatId, "❌ Ошибка генерации графика. Попробуй позже.")
+    }
+  }
+
+  // 📊 CHARTS: Показать график белка
+  else if (data === 'chart_protein') {
+    try {
+      await sendMessage(chatId, "⏳ Генерирую график...")
+
+      const response = await fetch(`${SUPABASE_URL}/functions/v1/progress-charts`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`
+        },
+        body: JSON.stringify({
+          userId: user.id,
+          chatId: chatId,
+          chartType: 'protein',
+          days: 30
+        })
+      })
+
+      if (!response.ok) {
+        throw new Error('Failed to generate chart')
+      }
+    } catch (error) {
+      console.error('Error generating chart:', error)
+      await sendMessage(chatId, "❌ Ошибка генерации графика. Попробуй позже.")
+    }
+  }
+
+  // 📊 CHARTS: Показать график веса
+  else if (data === 'chart_weight') {
+    try {
+      await sendMessage(chatId, "⏳ Генерирую график...")
+
+      const response = await fetch(`${SUPABASE_URL}/functions/v1/progress-charts`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`
+        },
+        body: JSON.stringify({
+          userId: user.id,
+          chatId: chatId,
+          chartType: 'weight',
+          days: 90
+        })
+      })
+
+      if (!response.ok) {
+        throw new Error('Failed to generate chart')
+      }
+    } catch (error) {
+      console.error('Error generating chart:', error)
+      await sendMessage(chatId, "❌ Ошибка генерации графика. Попробуй позже.")
+    }
+  }
+
+  // ⚖️ WEIGHT: Записать вес
+  else if (data === 'log_weight') {
+    await setUserState(userId, 'logging_weight', {})
+    await sendMessage(
+      chatId,
+      `⚖️ **Запись веса**\n\n` +
+      `Введи свой текущий вес в килограммах.\n` +
+      `Например: **75.5**\n\n` +
+      `💡 Для точности взвешивайся утром натощак.`,
+      {
+        inline_keyboard: [
+          [{ text: "❌ Отмена", callback_data: "cancel_action" }]
+        ]
+      }
+    )
+  }
+
+  // 🛒 SHOPPING LIST: Генерация списка покупок
+  else if (data === 'shopping_list' || data.startsWith('shopping_list_')) {
+    try {
+      let days = 7
+      if (data.startsWith('shopping_list_')) {
+        days = parseInt(data.split('_')[2])
+      }
+
+      await sendMessage(chatId, `⏳ Генерирую список покупок на ${days} дней...`)
+
+      // Вызываем Edge Function для генерации списка покупок
+      const response = await fetch(`${SUPABASE_URL}/functions/v1/shopping-list`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`
+        },
+        body: JSON.stringify({
+          userId: user.id,
+          chatId: chatId,
+          days: days
+        })
+      })
+
+      if (!response.ok) {
+        throw new Error('Failed to generate shopping list')
+      }
+    } catch (error) {
+      console.error('Error generating shopping list:', error)
+      await sendMessage(chatId, "❌ Ошибка генерации списка покупок. Попробуй позже.")
+    }
+  }
 }
 /**
  * Обработка текстовых сообщений
@@ -2219,8 +2358,9 @@ async function handleTextMessage(message: TelegramMessage) {
   // Сначала проверяем навигационные кнопки (они работают без состояния)
   const navigationButtons = ['🔙 Назад', '💬 Диалог с C.I.D.', '📊 Дневник', '⚙️ Настройки',
                               '📊 КБЖУ + Вода', '📝 Мои приемы пищи',
-                              '👤 Профиль', '❓ Помощь', '💎 Подписка']
-  
+                              '👤 Профиль', '❓ Помощь', '💎 Подписка', '🎯 Мои предпочтения',
+                              '🛒 Список покупок', '📈 Мой прогресс']
+
   if (navigationButtons.includes(message.text?.trim() || '')) {
     const handled = await handleNavigationButtons(message, user)
     if (handled) return
@@ -2551,6 +2691,58 @@ async function handleTextMessage(message: TelegramMessage) {
     }
   }
 
+  // ⚖️ Логирование веса
+  else if (stateData.state === 'logging_weight') {
+    if (!message.text) return
+    const weight = parseFloat(message.text.replace(',', '.'))
+    if (isNaN(weight) || weight < 30 || weight > 300) {
+      await sendMessage(message.chat.id, "❌ Пожалуйста, укажи корректный вес (30-300 кг)")
+      return
+    }
+
+    await sendMessage(message.chat.id, "⏳ Сохраняю...")
+
+    try {
+      // Логируем вес
+      const { data: result, error } = await supabase
+        .rpc('log_weight', {
+          p_user_id: user.id,
+          p_weight: weight,
+          p_note: null
+        })
+
+      if (error || !result.success) {
+        throw new Error('Failed to log weight')
+      }
+
+      let changeText = ''
+      if (result.previous_weight && result.weight_change !== 0) {
+        const changeValue = Math.abs(result.weight_change)
+        const changeDirection = result.weight_change > 0 ? '+' : '-'
+        changeText = `\n\n📈 Изменение: **${changeDirection}${changeValue.toFixed(1)}** кг` +
+          `\n(Предыдущий вес: ${result.previous_weight} кг)`
+      }
+
+      await sendMessage(
+        message.chat.id,
+        `✅ **Вес записан!**\n\n` +
+        `⚖️ **${weight} кг**${changeText}\n\n` +
+        `💡 Продолжай взвешиваться регулярно для отслеживания прогресса!`,
+        {
+          inline_keyboard: [
+            [{ text: "📊 График веса", callback_data: "chart_weight" }],
+            [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+          ]
+        }
+      )
+
+      await clearUserState(userId)
+    } catch (error) {
+      console.error('Error logging weight:', error)
+      await sendMessage(message.chat.id, "❌ Ошибка сохранения веса. Попробуй еще раз.")
+    }
+  }
+
   // Редактирование веса
   else if (stateData.state === 'editing_weight') {
     if (!message.text) return
@@ -2761,11 +2953,48 @@ async function handleNavigationButtons(message: TelegramMessage, user: any) {
     case '🎯 Мои предпочтения':
       await showUserPreferencesMenu(chatId, user.id)
       break
-    
+
+    case '🛒 Список покупок':
+      await sendMessage(
+        chatId,
+        `🛒 **Список покупок**\n\n` +
+        `Я могу составить список покупок на основе твоего плана питания.\n\n` +
+        `На сколько дней составить список?`,
+        {
+          inline_keyboard: [
+            [
+              { text: "📅 На 3 дня", callback_data: "shopping_list_3" },
+              { text: "📅 На 7 дней", callback_data: "shopping_list_7" }
+            ],
+            [{ text: "📅 На 14 дней", callback_data: "shopping_list_14" }],
+            [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+          ]
+        }
+      )
+      break
+
+    case '📈 Мой прогресс':
+      await sendMessage(
+        chatId,
+        `📈 **Мой прогресс**\n\n` +
+        `Выбери график для просмотра:`,
+        {
+          inline_keyboard: [
+            [
+              { text: "🔥 Калории", callback_data: "chart_calories" },
+              { text: "🥩 Белок", callback_data: "chart_protein" }
+            ],
+            [{ text: "⚖️ Вес", callback_data: "chart_weight" }],
+            [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+          ]
+        }
+      )
+      break
+
     default:
       return false // Не обработано
   }
-  
+
   return true // Обработано
 }
 /**
@@ -4094,15 +4323,19 @@ async function showProfileMenu(chatId: number, dbUserId: number) {
     profileText += `💡 Здесь ты можешь отредактировать свои параметры или изменить план КБЖУ`
     
     const keyboard: any[] = [
+      [
+        { text: "📈 График прогресса", callback_data: "show_charts" },
+        { text: "⚖️ Записать вес", callback_data: "log_weight" }
+      ],
       [{ text: "📊 Изменить план КБЖУ", callback_data: "edit_nutrition" }],
       [{ text: "✏️ Изменить параметры", callback_data: "edit_parameters" }]
     ]
-    
+
     // Показываем кнопку покупки только если подписка истекла
     if (subscriptionInfo && subscriptionInfo.needs_payment) {
       keyboard.unshift([{ text: "💳 Купить подписку", callback_data: "buy_subscription" }])
     }
-    
+
     keyboard.push([{ text: "🏠 Главное меню", callback_data: "main_menu" }])
     
     await sendMessage(chatId, profileText, {
@@ -4538,6 +4771,10 @@ async function showDiary(chatId: number, dbUserId: number) {
     }
     
     keyboard.inline_keyboard.push(
+      [
+        { text: "📈 График прогресса", callback_data: "show_charts" },
+        { text: "⚖️ Записать вес", callback_data: "log_weight" }
+      ],
       [{ text: "✏️ Редактировать профиль", callback_data: "edit_profile" }],
       [{ text: "🔄 Скорректировать план", callback_data: "adjust_card" }],
       [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
