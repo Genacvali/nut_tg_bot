@@ -1793,7 +1793,7 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
         `После оплаты подписка активируется автоматически.`,
         {
           inline_keyboard: [
-            [{ text: "💳 Оплатить", url: paymentData.paymentUrl }],
+            [{ text: "💳 Оплатить", url: paymentData.payment_url }],
             [{ text: "❌ Отмена", callback_data: "buy_subscription" }]
           ]
         }
