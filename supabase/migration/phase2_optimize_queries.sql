@@ -150,7 +150,7 @@ CREATE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id);
 CREATE INDEX IF NOT EXISTS idx_user_profiles_user_id ON user_profiles(user_id);
 CREATE INDEX IF NOT EXISTS idx_nutrition_plans_user_active ON nutrition_plans(user_id, is_active);
 CREATE INDEX IF NOT EXISTS idx_user_subscriptions_user_status ON user_subscriptions(user_id, status, expires_at);
-CREATE INDEX IF NOT EXISTS idx_user_preferences_user_id ON user_preferences(user_id);
+-- CREATE INDEX IF NOT EXISTS idx_user_preferences_user_id ON user_preferences(user_id); -- Закомментировано: таблица не существует
 
 -- ============================================
 -- 4. АЛЬТЕРНАТИВНАЯ ФУНКЦИЯ ДЛЯ user_id
