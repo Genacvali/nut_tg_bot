@@ -1529,6 +1529,9 @@ function afterFoodLogKeyboard(mealId?: number) {
       { text: "⭐ В избранное", callback_data: `save_template_${mealId}` },
       { text: "✏️ Изменить", callback_data: `edit_meal_${mealId}` }
     ])
+    keyboard.push([
+      { text: "🗑 Удалить", callback_data: `delete_meal_${mealId}` }
+    ])
   }
 
   keyboard.push([{ text: "🏠 Главное меню", callback_data: "main_menu" }])
@@ -1545,9 +1548,6 @@ function myDayActionsKeyboard() {
       [
         { text: "📝 Мои приемы", callback_data: "manage_meals" },
         { text: "⚡ Быстрый лог", callback_data: "quick_log" }
-      ],
-      [
-        { text: "📈 Прогресс", callback_data: "progress_menu" }
       ],
       [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
     ]
@@ -3468,38 +3468,38 @@ async function handleTextMessage(message: TelegramMessage) {
     }
   }
   
-  // Редактирование конкретных параметров
-  else if (stateData.state.startsWith('editing_')) {
-    if (!message.text) return
-    const param = stateData.state.replace('editing_', '')
-    await handleParameterEdit(userId, message.chat.id, user.id, param, message.text)
-  }
-  
   // Запись приема пищи
   else if (stateData.state === 'logging_food') {
     if (!message.text) return
     const clarificationAttempt = stateData.data?.clarification_attempt || 0
-    
+
     // Если это ответ на уточнение - комбинируем с исходным описанием
     let fullDescription = message.text
     if (clarificationAttempt > 0 && stateData.data?.original_description) {
       fullDescription = `${stateData.data.original_description} ${message.text}`
       console.log('Combined food description:', fullDescription)
     }
-    
+
     await handleFoodLogging(userId, message.chat.id, user.id, fullDescription, clarificationAttempt)
   }
-  
+
   // Запрос рецепта
   else if (stateData.state === 'requesting_recipe') {
     if (!message.text) return
     await handleRecipeRequest(userId, message.chat.id, user.id, message.text, message.message_id)
   }
-  
-  // Редактирование приема пищи
+
+  // Редактирование приема пищи (СПЕЦИАЛЬНЫЙ ОБРАБОТЧИК - ДОЛЖЕН БЫТЬ ПЕРЕД УНИВЕРСАЛЬНЫМ)
   else if (stateData.state === 'editing_meal') {
     if (!message.text) return
     await handleMealEdit(userId, message.chat.id, user.id, stateData.data.mealId, message.text)
+  }
+
+  // Редактирование конкретных параметров (УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК - ПОСЛЕ СПЕЦИАЛЬНЫХ)
+  else if (stateData.state.startsWith('editing_')) {
+    if (!message.text) return
+    const param = stateData.state.replace('editing_', '')
+    await handleParameterEdit(userId, message.chat.id, user.id, param, message.text)
   }
 
   // 🌟 QUICK LOG: Сохранение шаблона
