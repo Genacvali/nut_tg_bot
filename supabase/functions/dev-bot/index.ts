@@ -43,12 +43,288 @@ interface TelegramChat {
   id: number
   type: string
 }
+// ============================================
+// DEV BOT CONFIGURATION (@cid_tg_admin_bot)
+// Используется для тестирования UI/UX
+// ============================================
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
-const TELEGRAM_BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN')!
+const TELEGRAM_BOT_TOKEN_DEV = '8495765381:AAGLfXvTCNHX-fXXgrHRl4oTh8JYiHBOzns' // DEV BOT: @cid_tg_admin_bot
 const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY')!
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`
+const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN_DEV}`
+
+// ============================================
+// CONVERSATION MEMORY: Управление историей
+// ============================================
+
+interface ConversationMessage {
+  id: number
+  role: 'user' | 'assistant'
+  content: string
+  intent?: string
+  confidence?: number
+  created_at: string
+}
+
+interface IntentResult {
+  intent: 'food' | 'water' | 'question' | 'navigation'
+  confidence: number
+  reasoning: string
+  needsConfirmation: boolean
+}
+
+interface ConversationTopic {
+  topic: string | null
+  confidence: number
+  messages_count: number
+  is_active: boolean
+  last_message_at?: string
+}
+
+class ConversationManager {
+  /**
+   * Получить последние N сообщений пользователя
+   */
+  static async getRecentMessages(userId: number, limit: number = 10): Promise<ConversationMessage[]> {
+    try {
+      const { data, error } = await supabase
+        .rpc('get_recent_messages', {
+          p_user_id: userId,
+          p_limit: limit
+        })
+
+      if (error) {
+        console.error('Error getting recent messages:', error)
+        return []
+      }
+
+      return (data || []).reverse() // Возвращаем в хронологическом порядке
+    } catch (error) {
+      console.error('Exception in getRecentMessages:', error)
+      return []
+    }
+  }
+
+  /**
+   * Добавить сообщение в историю
+   */
+  static async addMessage(
+    userId: number,
+    role: 'user' | 'assistant',
+    content: string,
+    intent?: string,
+    confidence?: number,
+    metadata: any = {}
+  ): Promise<number | null> {
+    try {
+      const { data, error } = await supabase
+        .rpc('add_conversation_message', {
+          p_user_id: userId,
+          p_role: role,
+          p_content: content,
+          p_intent: intent,
+          p_confidence: confidence,
+          p_metadata: metadata
+        })
+
+      if (error) {
+        console.error('Error adding message:', error)
+        return null
+      }
+
+      return data
+    } catch (error) {
+      console.error('Exception in addMessage:', error)
+      return null
+    }
+  }
+
+  /**
+   * Получить текущую тему разговора
+   */
+  static async getCurrentTopic(userId: number): Promise<ConversationTopic | null> {
+    try {
+      const { data, error } = await supabase
+        .rpc('get_conversation_topic', { p_user_id: userId })
+
+      if (error) {
+        console.error('Error getting conversation topic:', error)
+        return null
+      }
+
+      return data as ConversationTopic
+    } catch (error) {
+      console.error('Exception in getCurrentTopic:', error)
+      return null
+    }
+  }
+
+  /**
+   * Очистить историю разговоров
+   */
+  static async clearContext(userId: number): Promise<boolean> {
+    try {
+      const { data, error } = await supabase
+        .rpc('clear_conversation_history', {
+          p_user_id: userId,
+          p_hard_delete: false
+        })
+
+      if (error) {
+        console.error('Error clearing history:', error)
+        return false
+      }
+
+      return true
+    } catch (error) {
+      console.error('Exception in clearContext:', error)
+      return false
+    }
+  }
+
+  /**
+   * Проверить нужно ли очистить контекст (timeout 30 мин)
+   */
+  static async checkAndClearIfStale(userId: number): Promise<void> {
+    const messages = await this.getRecentMessages(userId, 1)
+
+    if (messages.length === 0) return
+
+    const lastMessage = messages[0]
+    const lastMessageTime = new Date(lastMessage.created_at).getTime()
+    const now = Date.now()
+    const TIMEOUT = 30 * 60 * 1000 // 30 минут
+
+    if (now - lastMessageTime > TIMEOUT) {
+      console.log(`Clearing stale context for user ${userId}`)
+      await this.clearContext(userId)
+    }
+  }
+}
+
+/**
+ * AI-based Intent Detection с контекстом
+ */
+async function detectIntentWithContext(
+  text: string,
+  userId: number,
+  history: ConversationMessage[]
+): Promise<IntentResult> {
+  try {
+    // Формируем контекст из истории
+    const contextMessages = history.slice(-5).map(msg =>
+      `${msg.role === 'user' ? 'Пользователь' : 'Ассистент'}: ${msg.content}`
+    ).join('\n')
+
+    const prompt = `Ты - классификатор намерений для AI-диетолога C.I.D.
+
+КОНТЕКСТ последних сообщений:
+${contextMessages || 'Нет предыдущих сообщений'}
+
+НОВОЕ сообщение от пользователя:
+"${text}"
+
+ЗАДАЧА: определи намерение пользователя:
+
+1. "food" - ЛОГИРУЕТ прием пищи:
+   ✅ "съел овсянку 60г, банан"
+   ✅ "завтрак: яйца 2шт, хлеб"
+   ✅ "200г курицы, рис 100г"
+   ✅ "тарелка супа"
+   ✅ "поел", "скушал", "перекусил"
+   ❌ "можно ли банан?" (это вопрос!)
+   ❌ "что приготовить из курицы?" (вопрос!)
+   ❌ "салат" (без контекста - неоднозначно!)
+
+2. "water" - ЛОГИРУЕТ воду:
+   ✅ "выпил литр воды"
+   ✅ "500 мл", "1л"
+   ✅ "стакан воды", "бутылка воды"
+   ✅ "попил воды"
+
+3. "question" - ЗАДАЕТ ВОПРОС о питании:
+   ✅ "что мне поесть на ужин?"
+   ✅ "можно ли банан при похудении?"
+   ✅ "дай рецепт с курицей"
+   ✅ "сколько калорий в банане?"
+   ✅ "какие продукты содержат белок?"
+   ✅ "а какой соус лучше?" (продолжение диалога!)
+   ✅ ЕСЛИ ЭТО ОТВЕТ НА ВОПРОС АССИСТЕНТА - всегда question!
+
+4. "navigation" - хочет посмотреть данные:
+   ✅ "покажи мой дневник"
+   ✅ "мой вес", "моя статистика"
+   ✅ "сколько я съел сегодня калорий?"
+
+КРИТИЧЕСКИЕ ПРАВИЛА:
+🔥 Если в КОНТЕКСТЕ последние 2-3 сообщения - это ДИАЛОГ (вопрос-ответ), то новое сообщение = "question"
+🔥 Если есть ВОПРОСИТЕЛЬНЫЕ слова (что, как, когда, можно ли, стоит ли, какой) = "question"
+🔥 Если есть ИМПЕРАТИВЫ (дай, покажи, найди, составь, расскажи, предложи) = "question"
+🔥 Если есть ГРАММОВКА (60г, 200г, 2шт) + названия продуктов = "food"
+🔥 Если ТОЛЬКО названия продуктов БЕЗ контекста (например просто "салат") = needsConfirmation = true
+🔥 Если есть глаголы питания (съел, поел, выпил, скушал) = "food"
+
+Верни ТОЛЬКО JSON (без markdown):
+{
+  "intent": "food" | "water" | "question" | "navigation",
+  "confidence": 0.0-1.0,
+  "reasoning": "короткое объяснение на русском",
+  "needsConfirmation": true | false
+}`
+
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.3,
+        max_tokens: 150
+      })
+    })
+
+    const data = await response.json()
+
+    if (!data.choices || !data.choices[0]) {
+      throw new Error('Invalid OpenAI response')
+    }
+
+    const content = data.choices[0].message.content.trim()
+    // Убираем markdown если есть
+    const jsonContent = content.replace(/```json\n?|\n?```/g, '').trim()
+    const result: IntentResult = JSON.parse(jsonContent)
+
+    console.log('AI Intent Detection:', {
+      text,
+      result,
+      hasContext: history.length > 0
+    })
+
+    return result
+
+  } catch (error) {
+    console.error('Error in AI intent detection:', error)
+
+    // Fallback на старый метод
+    const fallbackIntent = await detectIntent(text)
+    return {
+      intent: fallbackIntent as any,
+      confidence: 0.6,
+      reasoning: 'Fallback to regex detection',
+      needsConfirmation: false
+    }
+  }
+}
+
+// ============================================
+// LEGACY: Старая regex-based детекция (fallback)
+// ============================================
 async function detectIntent(text: string): Promise<'food' | 'water' | 'question'> {
   const lowerText = text.toLowerCase().trim()
 
@@ -92,16 +368,22 @@ async function detectIntent(text: string): Promise<'food' | 'water' | 'question'
   const explicitQuestionPatterns = [
     /^(что|как|где|когда|почему|зачем|какой|какая|можно ли|стоит ли)/i,
     /\?$/,
-    /(посовет|подскаж|помог|расскаж|объясн|покаж|опиш|детал)/i,
-    /(можно съесть|что поесть|что приготовить|посоветуй|порекомендуй|дай рецепт|найди рецепт|покажи меню)/i,
-    /(расскажи|дай|покажи|найди|предложи|составь|сделай)/i
+    /(посовет|подскаж|помог|расскаж|объясн|покаж|опиш|детал|распиш)/i,
+    /(можно съесть|что поесть|что приготовить|посоветуй|порекомендуй|дай рецепт|найди рецепт|покажи меню|дай рацион|составь рацион)/i,
+    /(расскажи|дай|покажи|найди|предложи|составь|сделай|распиши)/i
   ]
-  
+
+  let hasExplicitQuestion = false
   for (const pattern of explicitQuestionPatterns) {
     if (pattern.test(lowerText)) {
-      console.log('Explicit question detected:', text)
-      return 'question'
+      hasExplicitQuestion = true
+      break
     }
+  }
+
+  if (hasExplicitQuestion) {
+    console.log('Explicit question detected:', text)
+    return 'question'
   }
   
   // ПРИОРИТЕТ 3: Сильные индикаторы еды (только если НЕТ вопросных маркеров)
@@ -1039,16 +1321,11 @@ function getMainKeyboard() {
   return {
     keyboard: [
       [
-        { text: "💬 Диалог с C.I.D." },
-        { text: "📊 Дневник" }
+        { text: "📊 Дневник" },
+        { text: "📖 Рецепты" }
       ],
       [
-        { text: "🛒 Список покупок" },
-        { text: "📈 Мой прогресс" }
-      ],
-      [
-        { text: "⚙️ Настройки" },
-        { text: "❓ Помощь" }
+        { text: "👤 Профиль" }
       ]
     ],
     resize_keyboard: true,
@@ -1133,6 +1410,150 @@ function goalKeyboard() {
     ]
   }
 }
+
+/**
+ * 🔥 НОВЫЕ ОПТИМИЗИРОВАННЫЕ КЛАВИАТУРЫ
+ */
+
+/**
+ * Быстрый выбор объема воды (inline)
+ */
+function quickWaterKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: "250 мл", callback_data: "log_water_250" },
+        { text: "500 мл", callback_data: "log_water_500" }
+      ],
+      [
+        { text: "1 л", callback_data: "log_water_1000" },
+        { text: "✏️ Другое", callback_data: "log_water_custom" }
+      ],
+      [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+    ]
+  }
+}
+
+/**
+ * Меню "Настройки"
+ */
+function settingsMenuKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: "👤 Профиль (КБЖУ)", callback_data: "show_profile" }
+      ],
+      [
+        { text: "📈 Прогресс", callback_data: "progress_menu" }
+      ],
+      [
+        { text: "💎 Подписка", callback_data: "show_subscription" }
+      ],
+      [
+        { text: "🎯 Предпочтения", callback_data: "show_preferences" }
+      ],
+      [
+        { text: "🔔 Уведомления", callback_data: "notifications_menu" }
+      ],
+      [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+    ]
+  }
+}
+
+/**
+ * Меню "Моё меню"
+ */
+function myMenuKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: "🍽 Мои шаблоны", callback_data: "my_templates" }
+      ],
+      [
+        { text: "📖 Мои рецепты", callback_data: "my_recipes" }
+      ],
+      [
+        { text: "🛒 Список покупок", callback_data: "shopping_menu" }
+      ],
+      [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+    ]
+  }
+}
+
+/**
+ * Клавиатура действий после ответа AI с рецептом/рационом
+ */
+function aiResponseActionsKeyboard(hasMultipleItems: boolean = false) {
+  const keyboard: any[][] = []
+
+  if (hasMultipleItems) {
+    // Если AI предложил рацион (несколько блюд)
+    keyboard.push([
+      { text: "📖 Сохранить рацион", callback_data: "save_ai_meal_plan" }
+    ])
+    keyboard.push([
+      { text: "💾 Сохранить по отдельности", callback_data: "save_ai_items_separately" }
+    ])
+  } else {
+    // Если AI предложил один рецепт
+    keyboard.push([
+      { text: "📖 Сохранить рецепт", callback_data: "save_ai_recipe" }
+    ])
+  }
+
+  keyboard.push([
+    { text: "🍽 Записать как прием", callback_data: "log_ai_as_meal" }
+  ])
+
+  keyboard.push([
+    { text: "🏠 Главное меню", callback_data: "main_menu" }
+  ])
+
+  return { inline_keyboard: keyboard }
+}
+
+/**
+ * Контекстные действия после записи еды
+ */
+function afterFoodLogKeyboard(mealId?: number) {
+  const keyboard: any[][] = [
+    [
+      { text: "🍽 Еще прием", callback_data: "quick_log_food" },
+      { text: "📊 Мой день", callback_data: "diary" }
+    ]
+  ]
+
+  // Добавляем кнопки редактирования если есть ID приема
+  if (mealId) {
+    keyboard.push([
+      { text: "⭐ В избранное", callback_data: `save_template_${mealId}` },
+      { text: "✏️ Изменить", callback_data: `edit_meal_${mealId}` }
+    ])
+  }
+
+  keyboard.push([{ text: "🏠 Главное меню", callback_data: "main_menu" }])
+
+  return { inline_keyboard: keyboard }
+}
+
+/**
+ * Inline меню для "Мой день" с быстрыми действиями
+ */
+function myDayActionsKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: "📝 Мои приемы", callback_data: "manage_meals" },
+        { text: "⚡ Быстрый лог", callback_data: "quick_log" }
+      ],
+      [
+        { text: "📈 Прогресс", callback_data: "progress_menu" }
+      ],
+      [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+    ]
+  }
+}
+
 /**
  * Обработка команды /start
  */
@@ -1615,13 +2036,7 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
         `🍞 Углеводы: ${analysis.total.carbs}г` +
         `${streakText}\n\n` +
         `⚠️ Помни: это примерная оценка!`,
-        {
-          inline_keyboard: [
-            [{ text: "📊 Дневник", callback_data: "diary" }],
-            [{ text: "🍽️ Записать еще", callback_data: "log_food" }],
-            [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
-          ]
-        }
+        afterFoodLogKeyboard()
       )
     } else {
       await sendMessage(chatId, "❌ Данные анализа не найдены. Отправь фото заново.")
@@ -1967,13 +2382,7 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
         `⭐ **${result.template_name}**\n\n` +
         `🔥 ${Math.round(result.calories)} ккал | 🥩 Б: ${result.protein}г | 🥑 Ж: ${result.fats}г | 🍞 У: ${result.carbs}г${streakText}`
 
-      await sendMessage(chatId, resultText, {
-        inline_keyboard: [
-          [{ text: "⚡ Еще раз", callback_data: "quick_log" }],
-          [{ text: "📊 Статистика", callback_data: "diary" }],
-          [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
-        ]
-      })
+      await sendMessage(chatId, resultText, afterFoodLogKeyboard())
 
     } catch (error) {
       console.error('Error using template:', error)
@@ -2449,6 +2858,294 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
       await sendMessage(chatId, "❌ Ошибка получения статистики")
     }
   }
+
+  // 🔥 НОВЫЕ ОБРАБОТЧИКИ: Произвольный объем воды
+  else if (data === 'log_water_custom') {
+    await setUserState(userId, 'entering_water_amount', {})
+    await sendMessage(
+      chatId,
+      `💧 **Ввод объема воды**\n\n` +
+      `Напиши сколько воды выпил:\n` +
+      `• В миллилитрах: "500 мл"\n` +
+      `• В литрах: "1.5 л"\n` +
+      `• Или просто: "стакан", "бутылка"`,
+      {
+        inline_keyboard: [
+          [{ text: "❌ Отмена", callback_data: "main_menu" }]
+        ]
+      }
+    )
+  }
+
+  // 🔥 НОВЫЕ ОБРАБОТЧИКИ: Меню "Ещё"
+  else if (data === 'shopping_menu') {
+    await sendMessage(
+      chatId,
+      `🛒 **Список покупок**\n\n` +
+      `Я могу составить список покупок на основе твоего плана питания.\n\n` +
+      `На сколько дней составить список?`,
+      {
+        inline_keyboard: [
+          [
+            { text: "📅 На 3 дня", callback_data: "shopping_list_3" },
+            { text: "📅 На 7 дней", callback_data: "shopping_list_7" }
+          ],
+          [{ text: "📅 На 14 дней", callback_data: "shopping_list_14" }],
+          [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+        ]
+      }
+    )
+  }
+
+  else if (data === 'progress_menu') {
+    await sendMessage(
+      chatId,
+      `📈 **Мой прогресс**\n\n` +
+      `Выбери график для просмотра:`,
+      {
+        inline_keyboard: [
+          [
+            { text: "🔥 Калории", callback_data: "chart_calories" },
+            { text: "🥩 Белок", callback_data: "chart_protein" }
+          ],
+          [{ text: "⚖️ Вес", callback_data: "chart_weight" }],
+          [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+        ]
+      }
+    )
+  }
+
+  else if (data === 'show_preferences') {
+    await showUserPreferencesMenu(chatId, user.id)
+  }
+
+  else if (data === 'help_menu') {
+    await showHelpMenu(chatId, user.id)
+  }
+
+  else if (data === 'show_subscription') {
+    await showSubscriptionMenu(chatId, user.id)
+  }
+
+  // 🔥 Обработчики для "Моё меню"
+  else if (data === 'my_templates') {
+    // Показываем сохраненные шаблоны приемов пищи
+    const { data: templates, error } = await supabase
+      .from('user_meal_templates')
+      .select('*')
+      .eq('user_id', user.id)
+      .order('created_at', { ascending: false })
+
+    if (error || !templates || templates.length === 0) {
+      await sendMessage(
+        chatId,
+        `🍽 **Мои шаблоны**\n\n` +
+        `У тебя пока нет сохраненных шаблонов.\n\n` +
+        `💡 **Как создать шаблон:**\n` +
+        `1. Запиши прием пищи\n` +
+        `2. Нажми "⭐ В избранное" под приемом\n` +
+        `3. Шаблон появится здесь для быстрого логирования`,
+        {
+          inline_keyboard: [
+            [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+          ]
+        }
+      )
+      return
+    }
+
+    // Показываем список шаблонов
+    const keyboard: any[][] = []
+    for (const template of templates.slice(0, 10)) {
+      keyboard.push([
+        {
+          text: `${template.template_name || 'Шаблон'} (${template.calories || '?'} ккал)`,
+          callback_data: `use_template_${template.id}`
+        }
+      ])
+    }
+    keyboard.push([{ text: "🏠 Главное меню", callback_data: "main_menu" }])
+
+    await sendMessage(
+      chatId,
+      `🍽 **Мои шаблоны**\n\n` +
+      `Выбери шаблон для быстрого логирования:`,
+      { inline_keyboard: keyboard }
+    )
+  }
+
+  else if (data === 'my_recipes') {
+    // Показываем сохраненные рецепты
+    const { data: recipes, error } = await supabase
+      .from('saved_recipes')
+      .select('*')
+      .eq('user_id', user.id)
+      .order('created_at', { ascending: false })
+
+    if (error || !recipes || recipes.length === 0) {
+      await sendMessage(
+        chatId,
+        `📖 **Мои рецепты**\n\n` +
+        `У тебя пока нет сохраненных рецептов.\n\n` +
+        `💡 **Как сохранить рецепт:**\n` +
+        `1. Попроси меня предложить рецепт\n` +
+        `2. Нажми "📖 Сохранить рецепт" под моим ответом\n` +
+        `3. Рецепт появится здесь`,
+        {
+          inline_keyboard: [
+            [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+          ]
+        }
+      )
+      return
+    }
+
+    // Показываем список рецептов
+    const keyboard: any[][] = []
+    for (const recipe of recipes.slice(0, 10)) {
+      keyboard.push([
+        {
+          text: `${recipe.name || 'Рецепт'} (${recipe.calories || '?'} ккал)`,
+          callback_data: `view_recipe_${recipe.id}`
+        }
+      ])
+    }
+    keyboard.push([{ text: "🏠 Главное меню", callback_data: "main_menu" }])
+
+    await sendMessage(
+      chatId,
+      `📖 **Мои рецепты**\n\n` +
+      `Выбери рецепт для просмотра:`,
+      { inline_keyboard: keyboard }
+    )
+  }
+
+  // Кнопка "Назад" → Меню Настройки
+  else if (data === 'settings_menu') {
+    await sendMessage(
+      chatId,
+      `⚙️ **Настройки**\n\n` +
+      `Управление профилем, целями и подпиской:`,
+      settingsMenuKeyboard()
+    )
+  }
+
+  // 🔥 Обработчики кнопок под AI-ответами
+  else if (data === 'save_ai_recipe') {
+    // Сохраняем последний рецепт от AI
+    await sendMessage(
+      chatId,
+      `💾 **Сохранение рецепта**\n\n` +
+      `Введи название для этого рецепта:\n\n` +
+      `Например: "Овсянка с бананом" или "Курица в духовке"`,
+      {
+        inline_keyboard: [
+          [{ text: "❌ Отмена", callback_data: "main_menu" }]
+        ]
+      }
+    )
+    // Устанавливаем состояние для ввода названия
+    await setUserState(userId, 'naming_recipe', {
+      recipeText: callbackQuery.message?.text || '',
+      messageId: callbackQuery.message?.message_id
+    })
+  }
+
+  else if (data === 'save_ai_meal_plan') {
+    // Сохраняем весь рацион
+    await sendMessage(
+      chatId,
+      `💾 **Сохранение рациона**\n\n` +
+      `Введи название для этого рациона:\n\n` +
+      `Например: "План на понедельник" или "Мой стандартный день"`,
+      {
+        inline_keyboard: [
+          [{ text: "❌ Отмена", callback_data: "main_menu" }]
+        ]
+      }
+    )
+    await setUserState(userId, 'naming_meal_plan', {
+      mealPlanText: callbackQuery.message?.text || '',
+      messageId: callbackQuery.message?.message_id
+    })
+  }
+
+  else if (data === 'save_ai_items_separately') {
+    // Показываем инструкцию по сохранению по отдельности
+    await sendMessage(
+      chatId,
+      `💾 **Сохранение по отдельности**\n\n` +
+      `Функция в разработке! Пока ты можешь:\n\n` +
+      `1. Сохранить весь рацион → 📖 Сохранить рацион\n` +
+      `2. Записать один прием → 🍽 Записать как прием\n\n` +
+      `💡 Скоро добавим возможность выбирать отдельные блюда!`,
+      {
+        inline_keyboard: [
+          [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+        ]
+      }
+    )
+  }
+
+  else if (data === 'log_ai_as_meal') {
+    // Записываем AI-рецепт как прием пищи
+    const messageText = callbackQuery.message?.text || ''
+
+    // Извлекаем КБЖУ из текста AI (ищем паттерны типа "500 ккал" или "Калорий: 500")
+    const caloriesMatch = messageText.match(/(\d+)\s*ккал/i)
+    const proteinMatch = messageText.match(/белк[а-я]*:\s*(\d+)/i)
+    const fatsMatch = messageText.match(/жир[а-я]*:\s*(\d+)/i)
+    const carbsMatch = messageText.match(/углевод[а-я]*:\s*(\d+)/i)
+
+    if (!caloriesMatch) {
+      await sendMessage(
+        chatId,
+        `❌ **Не удалось извлечь КБЖУ**\n\n` +
+        `Не нашел данные о калориях в рецепте. Попробуй записать прием вручную через чат.\n\n` +
+        `Например: "съел овсянку 60г, банан"`,
+        {
+          inline_keyboard: [
+            [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+          ]
+        }
+      )
+      return
+    }
+
+    const calories = parseInt(caloriesMatch[1])
+    const protein = proteinMatch ? parseInt(proteinMatch[1]) : 0
+    const fats = fatsMatch ? parseInt(fatsMatch[1]) : 0
+    const carbs = carbsMatch ? parseInt(carbsMatch[1]) : 0
+
+    // Записываем как прием пищи
+    const { data: meal, error } = await supabase
+      .from('food_logs')
+      .insert({
+        user_id: user.id,
+        description: 'Рецепт от AI',
+        calories: calories,
+        protein: protein,
+        fats: fats,
+        carbs: carbs,
+        logged_at: new Date().toISOString()
+      })
+      .select()
+      .single()
+
+    if (error) {
+      console.error('Error logging AI meal:', error)
+      await sendMessage(chatId, "❌ Ошибка при записи приема. Попробуй еще раз.")
+      return
+    }
+
+    await sendMessage(
+      chatId,
+      `✅ **Прием записан!**\n\n` +
+      `📊 КБЖУ: ${calories} ккал | Б: ${protein}г | Ж: ${fats}г | У: ${carbs}г\n\n` +
+      `Что дальше?`,
+      afterFoodLogKeyboard(meal.id)
+    )
+  }
 }
 /**
  * Обработка текстовых сообщений
@@ -2492,10 +3189,16 @@ async function handleTextMessage(message: TelegramMessage) {
   }
   
   // Сначала проверяем навигационные кнопки (они работают без состояния)
-  const navigationButtons = ['🔙 Назад', '💬 Диалог с C.I.D.', '📊 Дневник', '⚙️ Настройки',
-                              '📊 КБЖУ + Вода', '📝 Мои приемы пищи',
-                              '👤 Профиль', '❓ Помощь', '💎 Подписка', '🎯 Мои предпочтения',
-                              '🛒 Список покупок', '📈 Мой прогресс']
+  const navigationButtons = [
+    // Новые кнопки главного меню (3 кнопки)
+    '📊 Дневник', '📖 Рецепты', '⚙️ Настройки',
+    // Старые кнопки (для обратной совместимости)
+    '💧 Вода', '📊 Мой день', '📖 Моё меню', '❓ Помощь',
+    '🔙 Назад', '💬 Диалог с C.I.D.',
+    '📊 КБЖУ + Вода', '📝 Мои приемы пищи',
+    '👤 Профиль', '💎 Подписка', '🎯 Мои предпочтения',
+    '🛒 Список покупок', '📈 Мой прогресс'
+  ]
 
   if (navigationButtons.includes(message.text?.trim() || '')) {
     const handled = await handleNavigationButtons(message, user)
@@ -2506,7 +3209,7 @@ async function handleTextMessage(message: TelegramMessage) {
   // Если нет активного состояния - определяем намерение
   if (!stateData) {
     if (!message.text) return
-    
+
     const intent = await detectIntent(message.text)
     console.log('Detected intent:', intent, 'for message:', message.text)
 
@@ -2518,20 +3221,34 @@ async function handleTextMessage(message: TelegramMessage) {
       // Логируем воду
       await handleWaterLogging(userId, message.chat.id, user.id, message.text)
       return
+    } else if (intent === 'question') {
+      // 🔥 НОВАЯ ЛОГИКА: Умный чат - автоматически обрабатываем вопросы
+      // 1. Извлекаем предпочтения из сообщения пользователя
+      console.log(`🔍 Extracting preferences from message: "${message.text}"`)
+      const extractedPrefs = await extractPreferencesFromText(message.text)
+      console.log(`Found ${extractedPrefs.length} preferences:`, extractedPrefs)
+
+      // 2. Сохраняем предпочтения если нашли
+      if (extractedPrefs.length > 0) {
+        for (const pref of extractedPrefs) {
+          await saveUserPreference(
+            user.id,
+            pref.type as 'allergy' | 'intolerance' | 'dislike' | 'exclude' | 'preference',
+            pref.item
+          )
+        }
+        console.log(`✅ Saved ${extractedPrefs.length} preferences for user ${user.id}`)
+      }
+
+      // 3. Обрабатываем вопрос через AI-консультацию
+      await handleRecipeRequest(userId, message.chat.id, user.id, message.text, message.message_id)
+      return
     } else {
-      // Показываем заглушку с предложением перейти в Диалог
+      // Неизвестное намерение - показываем главное меню
       await sendMessage(
         message.chat.id,
-        `❓ **Похоже, ты хочешь задать вопрос!**\n\n` +
-        `💬 Для обсуждения рациона, рецептов и советов по питанию перейди в раздел **"Диалог с C.I.D."**\n\n` +
-        `📝 Здесь в обычном чате я записываю только приемы пищи.\n` +
-        `Просто опиши что съел (например: "банан 150г, овсянка 60г")`,
-        {
-          inline_keyboard: [
-            [{ text: "💬 Перейти к диалогу", callback_data: "menu_recipes" }],
-            [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
-          ]
-        }
+        `❓ Используй кнопки меню для навигации`,
+        getMainKeyboard()
       )
       return
     }
@@ -2844,6 +3561,7 @@ async function handleTextMessage(message: TelegramMessage) {
 
     try {
       // Логируем вес
+      console.log('Calling log_weight for user:', user.id, 'weight:', weight)
       const { data: result, error } = await supabase
         .rpc('log_weight', {
           p_user_id: user.id,
@@ -2851,8 +3569,19 @@ async function handleTextMessage(message: TelegramMessage) {
           p_note: null
         })
 
-      if (error || !result.success) {
-        throw new Error('Failed to log weight')
+      console.log('log_weight response:', { result, error })
+
+      if (error) {
+        console.error('DB error:', error)
+        throw new Error(`DB error: ${error.message}`)
+      }
+
+      if (!result) {
+        throw new Error('No result from log_weight function')
+      }
+
+      if (!result.success) {
+        throw new Error(`log_weight returned success=false: ${JSON.stringify(result)}`)
       }
 
       let changeText = ''
@@ -3021,12 +3750,166 @@ async function handleTextMessage(message: TelegramMessage) {
       }
     )
   }
-  
+
+  // 🔥 НОВЫЙ: Ввод произвольного объема воды
+  else if (stateData.state === 'entering_water_amount') {
+    if (!message.text) return
+
+    const text = message.text.toLowerCase().trim()
+    let amountMl = 0
+
+    // Парсим объем воды
+    if (text.includes('стакан')) {
+      amountMl = 250
+    } else if (text.includes('бутылка') || text.includes('бутылку')) {
+      amountMl = 500
+    } else if (text.match(/(\d+\.?\d*)\s*л(?:итр)?/)) {
+      const liters = parseFloat(text.match(/(\d+\.?\d*)\s*л(?:итр)?/)![1])
+      amountMl = liters * 1000
+    } else if (text.match(/(\d+)\s*мл/)) {
+      amountMl = parseInt(text.match(/(\d+)\s*мл/)![1])
+    } else {
+      await sendMessage(message.chat.id, "❌ Не могу распознать объем. Попробуй:\n• 500 мл\n• 1.5 л\n• стакан\n• бутылка")
+      return
+    }
+
+    if (amountMl < 50 || amountMl > 5000) {
+      await sendMessage(message.chat.id, "❌ Объем должен быть от 50мл до 5л")
+      return
+    }
+
+    try {
+      const { data: result, error } = await supabase
+        .rpc('log_water_intake', {
+          p_user_id: user.id,
+          p_amount_ml: amountMl,
+          p_note: null
+        })
+
+      if (error || !result.success) {
+        throw new Error('Failed to log water')
+      }
+
+      const todayTotalL = (result.today_total_ml / 1000).toFixed(1)
+      const targetL = (result.target_ml / 1000).toFixed(1)
+      const progressPercent = Math.round((result.today_total_ml / result.target_ml) * 100)
+      const amountL = (amountMl / 1000).toFixed(1)
+
+      let messageText = `✅ **Вода записана: ${amountL}л**\n\n`
+      messageText += `💧 Сегодня: **${todayTotalL}л** / ${targetL}л (${progressPercent}%)\n\n`
+
+      if (result.remaining_ml > 0) {
+        const remainingL = (result.remaining_ml / 1000).toFixed(1)
+        messageText += `📌 Осталось: **${remainingL}л**`
+      } else {
+        messageText += `🎉 **Цель достигнута!**`
+      }
+
+      await clearUserState(userId)
+      await sendMessage(message.chat.id, messageText, {
+        inline_keyboard: [
+          [{ text: "💧 Еще воды", callback_data: "quick_log_water" }],
+          [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+        ]
+      })
+    } catch (error) {
+      console.error('Error logging water:', error)
+      await sendMessage(message.chat.id, "❌ Ошибка записи воды")
+    }
+  }
+
+  // 🔥 Сохранение рецепта - ввод названия
+  else if (stateData.state === 'naming_recipe') {
+    if (!message.text) return
+
+    const recipeName = message.text.trim()
+    const recipeText = stateData.data?.recipeText || ''
+
+    // Извлекаем КБЖУ из текста рецепта
+    const caloriesMatch = recipeText.match(/(\d+)\s*ккал/i)
+    const proteinMatch = recipeText.match(/белк[а-я]*:\s*(\d+)/i)
+    const fatsMatch = recipeText.match(/жир[а-я]*:\s*(\d+)/i)
+    const carbsMatch = recipeText.match(/углевод[а-я]*:\s*(\d+)/i)
+
+    // Сохраняем рецепт
+    const { error } = await supabase
+      .from('saved_recipes')
+      .insert({
+        user_id: user.id,
+        name: recipeName,
+        content: recipeText,
+        calories: caloriesMatch ? parseInt(caloriesMatch[1]) : null,
+        protein: proteinMatch ? parseInt(proteinMatch[1]) : null,
+        fats: fatsMatch ? parseInt(fatsMatch[1]) : null,
+        carbs: carbsMatch ? parseInt(carbsMatch[1]) : null,
+        created_at: new Date().toISOString()
+      })
+
+    if (error) {
+      console.error('Error saving recipe:', error)
+      await sendMessage(message.chat.id, "❌ Ошибка при сохранении рецепта. Попробуй еще раз.")
+      return
+    }
+
+    await clearUserState(userId)
+    await sendMessage(
+      message.chat.id,
+      `✅ **Рецепт сохранен!**\n\n` +
+      `📖 "${recipeName}"\n\n` +
+      `Теперь ты можешь найти его в **Моё меню → Мои рецепты**`,
+      {
+        inline_keyboard: [
+          [{ text: "📖 Мои рецепты", callback_data: "my_recipes" }],
+          [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+        ]
+      }
+    )
+  }
+
+  // 🔥 Сохранение рациона - ввод названия
+  else if (stateData.state === 'naming_meal_plan') {
+    if (!message.text) return
+
+    const mealPlanName = message.text.trim()
+    const mealPlanText = stateData.data?.mealPlanText || ''
+
+    // Сохраняем рацион
+    const { error } = await supabase
+      .from('saved_recipes')
+      .insert({
+        user_id: user.id,
+        name: mealPlanName,
+        content: mealPlanText,
+        is_meal_plan: true,
+        created_at: new Date().toISOString()
+      })
+
+    if (error) {
+      console.error('Error saving meal plan:', error)
+      await sendMessage(message.chat.id, "❌ Ошибка при сохранении рациона. Попробуй еще раз.")
+      return
+    }
+
+    await clearUserState(userId)
+    await sendMessage(
+      message.chat.id,
+      `✅ **Рацион сохранен!**\n\n` +
+      `📖 "${mealPlanName}"\n\n` +
+      `Теперь ты можешь найти его в **Моё меню → Мои рецепты**`,
+      {
+        inline_keyboard: [
+          [{ text: "📖 Мои рецепты", callback_data: "my_recipes" }],
+          [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+        ]
+      }
+    )
+  }
+
   // Если состояние неизвестно - показываем главное меню
   else {
     console.log('Unhandled state:', stateData?.state, 'with text:', message.text)
     await sendMessage(
-      message.chat.id, 
+      message.chat.id,
       "❓ Используй кнопки меню для навигации",
       getMainKeyboard()
     )
@@ -3038,20 +3921,89 @@ async function handleTextMessage(message: TelegramMessage) {
 async function handleNavigationButtons(message: TelegramMessage, user: any) {
   const text = message.text?.trim()
   const chatId = message.chat.id
-  
+
   switch (text) {
     // Главное меню
     case '🔙 Назад':
-      await clearUserState(message.from.id) // Очищаем состояние
+      await clearUserState(message.from.id)
       await sendMessage(chatId, "🏠 **Главное меню**", getMainKeyboard())
       break
-    
-    // Меню питания
-    case '💬 Диалог с C.I.D.':
-      await setUserState(message.from.id, 'requesting_recipe', {})
+
+    // 🔥 НОВЫЕ ГЛАВНЫЕ КНОПКИ (3 шт)
+    case '📊 Дневник':
+      await showDiary(chatId, user.id)
+      break
+
+    case '📖 Рецепты':
       await sendMessage(
         chatId,
-        `💬 **Режим диалога активирован**\n\nПривет! Я твой AI-диетолог. Теперь все твои сообщения будут обрабатываться как вопросы о питании.\n\n✨ **Что я могу:**\n• Предложить рецепты с учетом КБЖУ\n• Составить меню на день/неделю\n• Дать совет по питанию\n• Помочь с выбором продуктов\n\n📝 **Записать еду?** Нажми "Главное меню" и просто напиши что съел в чат.\n\nЗадавай вопросы! 😊`,
+        `📖 **Рецепты**\n\n` +
+        `Здесь хранятся твои сохраненные шаблоны и рецепты.\n\n` +
+        `**🍽 Мои шаблоны** - быстрое логирование повторяющихся приемов пищи\n` +
+        `**📖 Мои рецепты** - сохраненные рецепты с инструкциями\n` +
+        `**🛒 Список покупок** - автоматический список на основе рациона`,
+        myMenuKeyboard()
+      )
+      break
+
+    // 🔥 Кнопка: Вода (inline выбор объема)
+    case '💧 Вода':
+      await sendMessage(
+        chatId,
+        `💧 **Сколько воды выпил?**\n\nВыбери быстро или введи свой объем:`,
+        quickWaterKeyboard()
+      )
+      break
+
+    // 🔥 Кнопка: Мой день (сразу показываем дневник + actions)
+    case '📊 Мой день':
+      await showDiary(chatId, user.id)
+      break
+
+    // 🔥 Кнопка: Моё меню (шаблоны + рецепты)
+    case '📖 Моё меню':
+      await sendMessage(
+        chatId,
+        `📖 **Моё меню**\n\n` +
+        `Здесь хранятся твои сохраненные шаблоны и рецепты.\n\n` +
+        `**🍽 Мои шаблоны** - быстрое логирование повторяющихся приемов пищи\n` +
+        `**📖 Мои рецепты** - сохраненные рецепты с инструкциями\n` +
+        `**🛒 Список покупок** - автоматический список на основе рациона`,
+        myMenuKeyboard()
+      )
+      break
+
+    // 🔥 Кнопка: Профиль
+    case '👤 Профиль':
+      await sendMessage(
+        chatId,
+        `👤 **Профиль**\n\n` +
+        `Управление профилем, целями и подпиской:`,
+        settingsMenuKeyboard()
+      )
+      break
+
+    // 🔥 Кнопка: Помощь (мануал)
+    case '❓ Помощь':
+      await sendMessage(
+        chatId,
+        `❓ **Помощь**\n\n` +
+        `**Умный чат:**\n` +
+        `Просто пиши в чат - я сам пойму что делать!\n` +
+        `• "съел овсянку 60г, банан" → запишу прием\n` +
+        `• "выпил 500мл воды" → запишу воду\n` +
+        `• "что на ужин?" → дам рецепт\n` +
+        `• "я не ем рыбу" → запомню предпочтения\n\n` +
+        `**Кнопки:**\n` +
+        `📊 **Дневник** - КБЖУ, вода, приемы пищи\n` +
+        `📖 **Рецепты** - сохраненные шаблоны и рецепты\n` +
+        `👤 **Профиль** - настройки, цели, подписка\n\n` +
+        `**Сохранение рецептов:**\n` +
+        `Когда я предлагаю рецепт, под сообщением появятся кнопки:\n` +
+        `• 📖 Сохранить рецепт\n` +
+        `• 🍽 Записать как прием\n` +
+        `• 💾 Сохранить по отдельности (для рационов)\n\n` +
+        `**Подсказка:** Я запоминаю контекст разговора, как ChatGPT!`,
         {
           inline_keyboard: [
             [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
@@ -3059,76 +4011,26 @@ async function handleNavigationButtons(message: TelegramMessage, user: any) {
         }
       )
       break
-    
-    // Меню дневника
-    case '📊 Дневник':
-      await sendMessage(chatId, "📊 **Дневник**\n\nТвоя статистика и приемы пищи", getDiaryKeyboard())
-      break
-    
+
+    // СТАРЫЕ КНОПКИ (для обратной совместимости)
     case '📊 КБЖУ + Вода':
       await showDiary(chatId, user.id)
       break
-    
+
     case '📝 Мои приемы пищи':
       await manageMeals(chatId, user.id)
       break
-    
-    // Меню настроек
-    case '⚙️ Настройки':
-      await sendMessage(chatId, "⚙️ **Настройки**\n\nУправление профилем и подпиской", getSettingsKeyboard())
-      break
-    
+
     case '👤 Профиль':
       await showProfileMenu(chatId, user.id)
       break
-    
-    case '❓ Помощь':
-      await showHelpMenu(chatId, user.id)
-      break
-    
+
     case '💎 Подписка':
       await showSubscriptionMenu(chatId, user.id)
       break
-    
+
     case '🎯 Мои предпочтения':
       await showUserPreferencesMenu(chatId, user.id)
-      break
-
-    case '🛒 Список покупок':
-      await sendMessage(
-        chatId,
-        `🛒 **Список покупок**\n\n` +
-        `Я могу составить список покупок на основе твоего плана питания.\n\n` +
-        `На сколько дней составить список?`,
-        {
-          inline_keyboard: [
-            [
-              { text: "📅 На 3 дня", callback_data: "shopping_list_3" },
-              { text: "📅 На 7 дней", callback_data: "shopping_list_7" }
-            ],
-            [{ text: "📅 На 14 дней", callback_data: "shopping_list_14" }],
-            [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
-          ]
-        }
-      )
-      break
-
-    case '📈 Мой прогресс':
-      await sendMessage(
-        chatId,
-        `📈 **Мой прогресс**\n\n` +
-        `Выбери график для просмотра:`,
-        {
-          inline_keyboard: [
-            [
-              { text: "🔥 Калории", callback_data: "chart_calories" },
-              { text: "🥩 Белок", callback_data: "chart_protein" }
-            ],
-            [{ text: "⚖️ Вес", callback_data: "chart_weight" }],
-            [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
-          ]
-        }
-      )
       break
 
     default:
@@ -3678,24 +4580,8 @@ async function handleFoodLogging(userId: number, chatId: number, dbUserId: numbe
 💬 ${analysis.comment}${streakText}
 💡 **Совет:** В следующий раз можешь просто 📸 сфотографировать еду!`
     
-    // Post-action buttons: редактировать, удалить, в избранное, статистика
-    await sendMessage(chatId, resultText, {
-      inline_keyboard: [
-        [
-          { text: "✏️ Изменить", callback_data: `edit_meal_${savedLog.id}` },
-          { text: "🗑 Удалить", callback_data: `delete_meal_${savedLog.id}` }
-        ],
-        [
-          { text: "⭐ В избранное", callback_data: `save_template_${savedLog.id}` }
-        ],
-        [
-          { text: "📊 Статистика", callback_data: "diary" }
-        ],
-        [
-          { text: "🍽 Записать еще", callback_data: "quick_log_food" }
-        ]
-      ]
-    })
+    // 🔥 ОПТИМИЗИРОВАННЫЕ Post-action buttons
+    await sendMessage(chatId, resultText, afterFoodLogKeyboard(savedLog.id))
     
     await clearUserState(userId)
   } catch (error) {
@@ -3944,8 +4830,12 @@ ${userPreferences.length > 0 ? `
 - НИКОГДА не отрицай упоминание, если оно есть в предыдущем ответе!
 📱 ФОРМАТИРОВАНИЕ ДЛЯ TELEGRAM:
 - НЕ используй markdown заголовки (####, ###, ##)
-- Используй эмодзи для выделения разделов: 🍽️, 🕐, 📊, 🔥
-- Для времени используй: 🕐 20:00 или ⏰ 20:00
+- Используй эмодзи для выделения разделов: 🍽️, ☀️, 🌆, 🌙, 📊, 🔥
+- Для приемов пищи используй периоды дня БЕЗ точного времени:
+  • ☀️ Утро - Завтрак
+  • 🌞 День - Обед
+  • 🌆 Вечер - Ужин
+  • 🍎 Перекус
 - Для КБЖУ используй: 🔥 600 ккал (Б: 50г, Ж: 15г, У: 40г)
 - Для списков используй эмодзи: • или -
 - НЕ добавляй лишние пустые строки между разделами
@@ -3953,11 +4843,11 @@ ${userPreferences.length > 0 ? `
 - Используй жирный текст **только** для важных моментов
 - Делай текст компактным и читаемым
 ПРИМЕР ПРАВИЛЬНОГО ФОРМАТИРОВАНИЯ:
-🕐 08:00 - Завтрак
+☀️ Утро - Завтрак
 • Овсянка с ягодами - 50г
 • Миндаль - 15г
 🔥 400 ккал (Б: 10г, Ж: 15г, У: 60г)
-🕐 14:00 - Обед  
+🌞 День - Обед
 • Куриное филе - 150г
 • Брокколи - 100г
 🔥 500 ккал (Б: 60г, Ж: 15г, У: 30г)
@@ -4048,17 +4938,18 @@ ${userPreferences.length > 0 ? `
     console.log(`💾 Saving assistant response to chat history (length: ${recommendation.length} chars)`)
     await saveChatMessage(dbUserId, 'assistant', recommendation)
 
-    // 12. Отправляем ответ пользователю с кнопкой главного меню (как reply на его сообщение)
-    await sendMessage(chatId, `📋 ${recommendation}`, {
-      inline_keyboard: [
-        [
-          {
-            text: "🏠 Главное меню",
-            callback_data: "main_menu"
-          }
-        ]
-      ]
-    }, 'Markdown', messageId)
+    // 12. Определяем тип ответа (рацион или один рецепт)
+    const mealMatches = recommendation.match(/(завтрак|обед|ужин|перекус):/gi)
+    const hasMultipleMeals = mealMatches ? mealMatches.length >= 2 : false
+
+    // 13. Отправляем ответ пользователю с кнопками сохранения (как reply на его сообщение)
+    await sendMessage(
+      chatId,
+      `📋 ${recommendation}`,
+      aiResponseActionsKeyboard(hasMultipleMeals),
+      'Markdown',
+      messageId
+    )
     
     // НЕ очищаем state - пользователь остается в режиме диалога
     // Он может просто продолжить писать, диалог идет непрерывно
@@ -4080,7 +4971,7 @@ async function handleVoiceMessage(message: TelegramMessage) {
     
     // Получаем информацию о файле
     const fileResponse = await fetch(
-      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getFile?file_id=${message.voice!.file_id}`
+      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN_DEV}/getFile?file_id=${message.voice!.file_id}`
     )
     const fileData = await fileResponse.json()
     
@@ -4090,7 +4981,7 @@ async function handleVoiceMessage(message: TelegramMessage) {
     
     // Скачиваем файл
     const filePath = fileData.result.file_path
-    const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${filePath}`
+    const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN_DEV}/${filePath}`
     const audioResponse = await fetch(fileUrl)
     const audioBuffer = await audioResponse.arrayBuffer()
     
@@ -4138,12 +5029,12 @@ async function handleVoiceMessage(message: TelegramMessage) {
 async function getPhotoUrl(fileId: string): Promise<string | null> {
   try {
     const response = await fetch(
-      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`
+      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN_DEV}/getFile?file_id=${fileId}`
     )
     const data = await response.json()
     
     if (data.ok && data.result.file_path) {
-      return `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${data.result.file_path}`
+      return `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN_DEV}/${data.result.file_path}`
     }
     return null
   } catch (error) {
@@ -4825,21 +5716,35 @@ async function manageMeals(chatId: number, dbUserId: number) {
     let mealIndex = 0
     Object.keys(logsByDate).sort().reverse().forEach(date => {
       message += `${formatDate(date)}\n\n`
-      
+
       logsByDate[date].forEach(log => {
         mealIndex++
-        const time = new Date(log.logged_at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
-        const shortDesc = log.description.length > 30 ? log.description.substring(0, 30) + '...' : log.description
-        
-        message += `**${mealIndex}.** ⏰ ${time} - ${shortDesc}\n`
-        message += `   🔥 ${log.calories}ккал | Б:${log.protein}г | Ж:${log.fats}г | У:${log.carbs}г\n`
-        
+
+        // Определяем период дня вместо точного времени
+        const logDate = new Date(log.logged_at)
+        const hour = logDate.getHours()
+        let period = ''
+        if (hour >= 5 && hour < 12) period = '☀️ Утро'
+        else if (hour >= 12 && hour < 17) period = '🌞 День'
+        else if (hour >= 17 && hour < 22) period = '🌆 Вечер'
+        else period = '🌙 Ночь'
+
+        // Показываем полное описание (до 100 символов)
+        const desc = log.description.length > 100
+          ? log.description.substring(0, 100) + '...'
+          : log.description
+
+        message += `**${mealIndex}.** ${period}\n`
+        message += `${desc}\n`
+        message += `🔥 ${log.calories} ккал • Б: ${log.protein}г • Ж: ${log.fats}г • У: ${log.carbs}г\n`
+        message += `━━━━━━━━━━━━━━\n`
+
         // Inline кнопки для каждого приема
         keyboard.inline_keyboard.push([
           { text: `✏️ #${mealIndex}`, callback_data: `edit_meal_${log.id}` },
           { text: `🗑 #${mealIndex}`, callback_data: `delete_meal_${log.id}` }
         ])
-        
+
         message += '\n'
       })
     })
@@ -5011,29 +5916,8 @@ async function showDiary(chatId: number, dbUserId: number) {
       })
     }
     
-    // Формируем клавиатуру
-    const keyboard: any = {
-      inline_keyboard: []
-    }
-    
-    // Если есть приемы пищи, добавляем кнопку для управления ими
-    if (todayLogs && todayLogs.length > 0) {
-      keyboard.inline_keyboard.push([
-        { text: "📝 Управление приемами", callback_data: "manage_meals" }
-      ])
-    }
-    
-    keyboard.inline_keyboard.push(
-      [
-        { text: "📈 График прогресса", callback_data: "show_charts" },
-        { text: "⚖️ Записать вес", callback_data: "log_weight" }
-      ],
-      [{ text: "✏️ Редактировать профиль", callback_data: "edit_profile" }],
-      [{ text: "🔄 Скорректировать план", callback_data: "adjust_card" }],
-      [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
-    )
-    
-    await sendMessage(chatId, diaryText, keyboard)
+    // 🔥 ОПТИМИЗИРОВАННАЯ клавиатура с быстрыми действиями
+    await sendMessage(chatId, diaryText, myDayActionsKeyboard())
   } catch (error) {
     console.error('Error showing diary:', error)
     await sendMessage(chatId, "❌ Ошибка загрузки дневника")
