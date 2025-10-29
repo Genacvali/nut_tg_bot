@@ -5202,7 +5202,7 @@ async function handleVoiceMessage(message: TelegramMessage) {
     
     // Получаем информацию о файле
     const fileResponse = await fetch(
-      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN_DEV}/getFile?file_id=${message.voice!.file_id}`
+      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getFile?file_id=${message.voice!.file_id}`
     )
     const fileData = await fileResponse.json()
     
@@ -5212,7 +5212,7 @@ async function handleVoiceMessage(message: TelegramMessage) {
     
     // Скачиваем файл
     const filePath = fileData.result.file_path
-    const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN_DEV}/${filePath}`
+    const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${filePath}`
     const audioResponse = await fetch(fileUrl)
     const audioBuffer = await audioResponse.arrayBuffer()
     
@@ -5260,12 +5260,12 @@ async function handleVoiceMessage(message: TelegramMessage) {
 async function getPhotoUrl(fileId: string): Promise<string | null> {
   try {
     const response = await fetch(
-      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN_DEV}/getFile?file_id=${fileId}`
+      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`
     )
     const data = await response.json()
     
     if (data.ok && data.result.file_path) {
-      return `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN_DEV}/${data.result.file_path}`
+      return `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${data.result.file_path}`
     }
     return null
   } catch (error) {
