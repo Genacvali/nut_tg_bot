@@ -280,7 +280,7 @@ ${contextMessages || 'Нет предыдущих сообщений'}
         'Authorization': `Bearer ${OPENAI_API_KEY}`
       },
       body: JSON.stringify({
-        model: 'gpt-4o-mini',
+        model: 'gpt-5-nano',
         messages: [
           { role: 'user', content: prompt }
         ],
@@ -1338,7 +1338,7 @@ ${profileData.wishes ? `- Пожелания клиента: "${profileData.wish
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'gpt-4o-mini',
+        model: 'gpt-5-nano',
         messages: [
           {
             role: 'system',
@@ -1386,7 +1386,7 @@ async function adjustNutritionPlan(currentPlan: any, userRequest: string, profil
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: 'gpt-4o-mini',
+      model: 'gpt-5-nano',
       messages: [
         {
           role: 'system',
@@ -1488,7 +1488,8 @@ function getMainKeyboard() {
         { text: "📖 Рецепты" }
       ],
       [
-        { text: "👤 Профиль" }
+        { text: "👤 Профиль" },
+        { text: "❓ Помощь" }
       ]
     ],
     resize_keyboard: true,
@@ -4160,7 +4161,8 @@ async function handleNavigationButtons(message: TelegramMessage, user: any) {
         `**Кнопки:**\n` +
         `📊 **Дневник** - КБЖУ, вода, приемы пищи\n` +
         `📖 **Рецепты** - сохраненные шаблоны и рецепты\n` +
-        `👤 **Профиль** - настройки, цели, подписка\n\n` +
+        `👤 **Профиль** - настройки, цели, подписка\n` +
+        `❓ **Помощь** - инструкция по использованию бота\n\n` +
         `**Сохранение рецептов:**\n` +
         `Когда я предлагаю рецепт, под сообщением появятся кнопки:\n` +
         `• 📖 Сохранить рецепт\n` +
@@ -4169,7 +4171,8 @@ async function handleNavigationButtons(message: TelegramMessage, user: any) {
         `**Подсказка:** Я запоминаю контекст разговора, как ChatGPT!`,
         {
           inline_keyboard: [
-            [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+            [{ text: "🏠 Главное меню", callback_data: "main_menu" }],
+            [{ text: "💝 Поддержать проект", callback_data: "support_project" }]
           ]
         }
       )
@@ -4267,7 +4270,7 @@ async function handleMealEdit(userId: number, chatId: number, dbUserId: number, 
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'gpt-4o-mini',
+        model: 'gpt-5-nano',
         messages: [
           { role: 'system', content: 'Ты C.I.D. - AI-диетолог. КРИТИЧЕСКИ ВАЖНО: СТРОГО используй ТОЛЬКО таблицы БЖУ из инструкций для расчетов. НЕ придумывай значения. Для орехов ВСЕГДА: ~620 ккал/100г, Ж:55г (МНОГО жиров!), У:12г (мало углеводов!). Пример: 70г орехов = 434 ккал, Ж:38.5г, У:8.4г. Будь математически точным при умножении на вес.' },
           { role: 'user', content: prompt }
@@ -4682,7 +4685,7 @@ async function handleFoodLogging(userId: number, chatId: number, dbUserId: numbe
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'gpt-4o-mini',
+        model: 'gpt-5-nano',
         messages: [
           { role: 'system', content: 'Ты C.I.D. - AI-диетолог. КРИТИЧЕСКИ ВАЖНО: СТРОГО используй ТОЛЬКО таблицы БЖУ из инструкций для расчетов. НЕ придумывай значения. Для орехов ВСЕГДА: ~620 ккал/100г, Ж:55г (МНОГО жиров!), У:12г (мало углеводов!). Пример: 70г орехов = 434 ккал, Ж:38.5г, У:8.4г. Будь математически точным при умножении на вес. ВАЖНО: Возвращай ТОЛЬКО валидный JSON. В текстовых полях НЕ используй переносы строк - заменяй их на пробелы. Все кавычки внутри строк экранируй.' },
           { role: 'user', content: prompt }
@@ -5196,7 +5199,7 @@ ${userPreferences.length > 0 ? `
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            model: 'gpt-4o-mini',
+            model: 'gpt-5-nano',
             messages: messages,
             temperature: 0.7, // Понижено для более точной обработки контекста
             max_tokens: 2500 // Увеличено для полноценных развернутых ответов с рационами
@@ -5372,7 +5375,7 @@ ${caption ? `Дополнительная информация от пользо
       'Authorization': `Bearer ${OPENAI_API_KEY}`
     },
     body: JSON.stringify({
-      model: 'gpt-4o',
+      model: 'gpt-5-nano',
       messages: [
         {
           role: 'user',
