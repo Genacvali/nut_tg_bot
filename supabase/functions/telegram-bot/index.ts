@@ -284,8 +284,7 @@ ${contextMessages || 'Нет предыдущих сообщений'}
         messages: [
           { role: 'user', content: prompt }
         ],
-        temperature: 0.3,
-        max_tokens: 150
+        max_completion_tokens: 150
       })
     })
 
@@ -1349,9 +1348,7 @@ ${profileData.wishes ? `- Пожелания клиента: "${profileData.wish
             content: prompt
           }
         ],
-        temperature: 0.7,
-        response_format: { type: 'json_object' },
-        max_tokens: 1000
+        max_completion_tokens: 1000
       })
     })
     if (!response.ok) {
@@ -1397,9 +1394,7 @@ async function adjustNutritionPlan(currentPlan: any, userRequest: string, profil
           content: prompt
         }
       ],
-      temperature: 0.7,
-      response_format: { type: 'json_object' },
-      max_tokens: 500
+      max_completion_tokens: 500
     })
   })
   const data = await response.json()
@@ -4275,13 +4270,31 @@ async function handleMealEdit(userId: number, chatId: number, dbUserId: number, 
           { role: 'system', content: 'Ты C.I.D. - AI-диетолог. КРИТИЧЕСКИ ВАЖНО: СТРОГО используй ТОЛЬКО таблицы БЖУ из инструкций для расчетов. НЕ придумывай значения. Для орехов ВСЕГДА: ~620 ккал/100г, Ж:55г (МНОГО жиров!), У:12г (мало углеводов!). Пример: 70г орехов = 434 ккал, Ж:38.5г, У:8.4г. Будь математически точным при умножении на вес.' },
           { role: 'user', content: prompt }
         ],
-        temperature: 0.1,
-        response_format: { type: 'json_object' },
-        max_tokens: 500
+        max_completion_tokens: 500
       })
     })
     const data = await response.json()
-    const rawAnalysis = JSON.parse(data.choices[0].message.content)
+    console.log('OpenAI response for food editing:', JSON.stringify(data))
+
+    // Парсим JSON с обработкой ошибок
+    let rawAnalysis
+    try {
+      let content = data.choices[0]?.message?.content || ''
+      if (!content.trim()) {
+        throw new Error('Empty response from API')
+      }
+      // Очищаем от возможных markdown блоков
+      content = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
+      rawAnalysis = JSON.parse(content)
+    } catch (parseError) {
+      console.error('JSON parsing error:', parseError)
+      console.error('Raw content:', data.choices[0]?.message?.content)
+      await sendMessage(chatId, "❌ Не удалось обработать ответ. Попробуй еще раз.", {
+        inline_keyboard: [[{ text: "🏠 Главное меню", callback_data: "main_menu" }]]
+      })
+      await clearUserState(userId)
+      return
+    }
 
     // ⚡ ВАЛИДАЦИЯ И АВТОКОРРЕКЦИЯ КБЖУ
     const validated = validateNutrition(rawAnalysis)
@@ -4690,9 +4703,7 @@ async function handleFoodLogging(userId: number, chatId: number, dbUserId: numbe
           { role: 'system', content: 'Ты C.I.D. - AI-диетолог. КРИТИЧЕСКИ ВАЖНО: СТРОГО используй ТОЛЬКО таблицы БЖУ из инструкций для расчетов. НЕ придумывай значения. Для орехов ВСЕГДА: ~620 ккал/100г, Ж:55г (МНОГО жиров!), У:12г (мало углеводов!). Пример: 70г орехов = 434 ккал, Ж:38.5г, У:8.4г. Будь математически точным при умножении на вес. ВАЖНО: Возвращай ТОЛЬКО валидный JSON. В текстовых полях НЕ используй переносы строк - заменяй их на пробелы. Все кавычки внутри строк экранируй.' },
           { role: 'user', content: prompt }
         ],
-        temperature: 0.1,
-        response_format: { type: 'json_object' },
-        max_tokens: 1000  // Увеличено для больших списков продуктов
+        max_completion_tokens: 1000  // Увеличено для больших списков продуктов
       })
     })
     const data = await response.json()
@@ -5201,8 +5212,7 @@ ${userPreferences.length > 0 ? `
           body: JSON.stringify({
             model: 'gpt-5-nano',
             messages: messages,
-            temperature: 0.7, // Понижено для более точной обработки контекста
-            max_tokens: 2500 // Увеличено для полноценных развернутых ответов с рационами
+            max_completion_tokens: 2500 // Увеличено для полноценных развернутых ответов с рационами
           })
         },
         3, // maxRetries
@@ -5393,8 +5403,7 @@ ${caption ? `Дополнительная информация от пользо
           ]
         }
       ],
-      max_tokens: 1000,
-      temperature: 0.3
+      max_completion_tokens: 1000,
     })
   })
   

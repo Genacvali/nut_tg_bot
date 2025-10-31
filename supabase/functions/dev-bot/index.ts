@@ -49,7 +49,7 @@ interface TelegramChat {
 // ============================================
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
-const TELEGRAM_BOT_TOKEN_DEV = '8495765381:AAGLfXvTCNHX-fXXgrHRl4oTh8JYiHBOzns' // DEV BOT: @cid_tg_admin_bot
+const TELEGRAM_BOT_TOKEN_DEV = Deno.env.get('TELEGRAM_BOT_TOKEN_DEV')!
 const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY')!
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN_DEV}`
@@ -280,12 +280,11 @@ ${contextMessages || 'Нет предыдущих сообщений'}
         'Authorization': `Bearer ${OPENAI_API_KEY}`
       },
       body: JSON.stringify({
-        model: 'gpt-4o-mini',
+        model: 'gpt-5-nano',
         messages: [
           { role: 'user', content: prompt }
         ],
-        temperature: 0.3,
-        max_tokens: 150
+        max_completion_tokens: 150
       })
     })
 
@@ -330,11 +329,11 @@ async function detectIntent(text: string): Promise<'food' | 'water' | 'question'
 
   // 💧 ПРИОРИТЕТ 0: Детекция воды (специфичный case)
   const waterPatterns = [
-    /\d+\s*(л|литр|мл|миллилитр)/i,  // Цифры с единицами измерения жидкости
+    /\d+\s*(л|литр|мл|миллилитр)\b/i,  // Цифры с единицами измерения жидкости (word boundary!)
     /(выпил|выпила|попил|попила|пью|пьёт)\s+(вод|жидкост)/i,  // Глаголы питья + вода
     /^\s*(вод|жидкост)/i,  // Начинается с "вода"
     /(стакан|бутылк|кружк|чашк)\s+(вод|жидкост)/i,  // Емкости с водой
-    /^\d+\s*(л|литр|мл)\s*(вод|жидкост)?/i  // Начинается с количества литров/мл
+    /^\d+\s*(л|литр|мл)\b\s*(вод|жидкост)?/i  // Начинается с количества литров/мл (word boundary!)
   ]
 
   for (const pattern of waterPatterns) {
@@ -489,10 +488,173 @@ async function clearUserState(userId: number) {
     .delete()
     .eq('telegram_id', userId)
 }
+
+// ============================================
+// NUTRITION VALIDATION: Проверка и исправление КБЖУ
+// ============================================
+
+interface FoodItem {
+  product: string
+  weight: string
+  calories: number
+  protein: number
+  fats: number
+  carbs: number
+}
+
+interface ValidationResult {
+  corrected: boolean
+  notes: string[]
+  calories: number
+  protein: number
+  fats: number
+  carbs: number
+  breakdown: FoodItem[]
+}
+
+function validateNutrition(analysis: any): ValidationResult {
+  const notes: string[] = []
+  let corrected = false
+
+  // Константы калорий на 1г макроса
+  const KCAL_PER_G = { protein: 4, fat: 9, carb: 4 }
+
+  // Функция для определения категории продукта
+  function getCategory(productName: string): string {
+    const name = productName.toLowerCase()
+    if (name.match(/орех|миндаль|грецк|кешью|арахис|фисташ/)) return 'nuts'
+    if (name.match(/творог|йогурт|кефир|молоко|сыр|греч/)) return 'dairy'
+    if (name.match(/курица|тунец|рыба|мясо|говяд|свинина/)) return 'protein'
+    return 'other'
+  }
+
+  // Функция для валидации и исправления одного продукта
+  function validateProduct(item: FoodItem): FoodItem {
+    const fixed = { ...item }
+    const category = getCategory(item.product)
+
+    // Извлекаем вес в граммах
+    const weightMatch = item.weight.match(/(\d+(?:\.\d+)?)\s*(?:г|g|грамм)/i)
+    if (!weightMatch) return fixed
+
+    const weightG = parseFloat(weightMatch[1])
+
+    // Пересчитываем на 100г для проверки
+    const per100 = {
+      calories: (item.calories / weightG) * 100,
+      protein: (item.protein / weightG) * 100,
+      fats: (item.fats / weightG) * 100,
+      carbs: (item.carbs / weightG) * 100
+    }
+
+    // Проверяем калории по формуле 4-9-4
+    const calcKcal = item.protein * KCAL_PER_G.protein +
+                     item.fats * KCAL_PER_G.fat +
+                     item.carbs * KCAL_PER_G.carb
+    const kcalDelta = Math.abs(calcKcal - item.calories) / Math.max(1, item.calories)
+
+    // Категорийные проверки
+    if (category === 'nuts') {
+      // Орехи: 600-650 ккал/100г, Ж: 50-60г/100г, У: 10-15г/100г
+      if (per100.fats < 45 || per100.calories < 500 || per100.carbs > 20) {
+        notes.push(`🔧 Исправлены орехи: жиры должны быть ~55г/100г, углеводы ~12г/100г`)
+        corrected = true
+        // Правильные значения для орехов
+        fixed.fats = Math.round((weightG * 55 / 100) * 10) / 10
+        fixed.protein = Math.round((weightG * 18 / 100) * 10) / 10
+        fixed.carbs = Math.round((weightG * 12 / 100) * 10) / 10
+        fixed.calories = Math.round(
+          fixed.protein * KCAL_PER_G.protein +
+          fixed.fats * KCAL_PER_G.fat +
+          fixed.carbs * KCAL_PER_G.carb
+        )
+      }
+    } else if (category === 'dairy') {
+      const isLowFatCottage = item.product.match(/творог.*(обезжир|0%)|обезжир.*творог/i)
+      const isGreekYogurt = item.product.match(/греч.*йогурт|йогурт.*греч/i)
+
+      if (isLowFatCottage) {
+        // Творог обезжиренный: 70-80 ккал/100г, Б: 16-18г/100г
+        if (per100.protein < 14 || per100.protein > 20) {
+          notes.push(`🔧 Исправлен творог: белок ~17г/100г`)
+          corrected = true
+          fixed.protein = Math.round((weightG * 17 / 100) * 10) / 10
+          fixed.fats = Math.round((weightG * 1 / 100) * 10) / 10
+          fixed.carbs = Math.round((weightG * 2.5 / 100) * 10) / 10
+          fixed.calories = Math.round(
+            fixed.protein * KCAL_PER_G.protein +
+            fixed.fats * KCAL_PER_G.fat +
+            fixed.carbs * KCAL_PER_G.carb
+          )
+        }
+      } else if (isGreekYogurt) {
+        // Греческий йогурт: 60-70 ккал/100г, Б: 10-11г/100г, Ж: 0-2г/100г
+        if (per100.fats === 0 && per100.protein > 9) {
+          notes.push(`🔧 Добавлен жир для греческого йогурта: минимум 2г/100г`)
+          corrected = true
+          fixed.fats = Math.round((weightG * 2 / 100) * 10) / 10
+          fixed.calories = Math.round(
+            fixed.protein * KCAL_PER_G.protein +
+            fixed.fats * KCAL_PER_G.fat +
+            fixed.carbs * KCAL_PER_G.carb
+          )
+        }
+      }
+    }
+
+    // Общая проверка калорий (если дельта > 12%)
+    const finalCalcKcal = fixed.protein * KCAL_PER_G.protein +
+                          fixed.fats * KCAL_PER_G.fat +
+                          fixed.carbs * KCAL_PER_G.carb
+    const finalDelta = Math.abs(finalCalcKcal - fixed.calories) / Math.max(1, fixed.calories)
+
+    if (finalDelta > 0.12) {
+      notes.push(`🔧 Калории пересчитаны по формуле 4-9-4`)
+      corrected = true
+      fixed.calories = Math.round(finalCalcKcal)
+    }
+
+    return fixed
+  }
+
+  // Обрабатываем каждый продукт
+  const fixedBreakdown = (analysis.breakdown || []).map(validateProduct)
+
+  // Пересчитываем общие значения
+  const totals = fixedBreakdown.reduce((acc, item) => ({
+    calories: acc.calories + item.calories,
+    protein: acc.protein + item.protein,
+    fats: acc.fats + item.fats,
+    carbs: acc.carbs + item.carbs
+  }), { calories: 0, protein: 0, fats: 0, carbs: 0 })
+
+  // Финальная проверка общих калорий
+  const totalCalcKcal = totals.protein * KCAL_PER_G.protein +
+                        totals.fats * KCAL_PER_G.fat +
+                        totals.carbs * KCAL_PER_G.carb
+  const totalDelta = Math.abs(totalCalcKcal - totals.calories) / Math.max(1, totals.calories)
+
+  if (totalDelta > 0.08) {
+    notes.push(`🔧 Общие калории пересчитаны по формуле 4-9-4`)
+    corrected = true
+    totals.calories = Math.round(totalCalcKcal)
+  }
+
+  return {
+    corrected,
+    notes,
+    calories: Math.round(totals.calories),
+    protein: Math.round(totals.protein),
+    fats: Math.round(totals.fats),
+    carbs: Math.round(totals.carbs),
+    breakdown: fixedBreakdown
+  }
+}
+
 async function saveChatMessage(dbUserId: number, role: 'user' | 'assistant' | 'system', content: string) {
   try {
     const { data, error } = await supabase
-      .from('chat_history')
+      .from('conversation_history')
       .insert({
         user_id: dbUserId,
         role: role,
@@ -510,7 +672,7 @@ async function saveChatMessage(dbUserId: number, role: 'user' | 'assistant' | 's
 async function getChatHistory(dbUserId: number, limit: number = 10): Promise<Array<{role: string, content: string}>> {
   try {
     const { data, error } = await supabase
-      .from('chat_history')
+      .from('conversation_history')
       .select('role, content')
       .eq('user_id', dbUserId)
       .order('created_at', { ascending: false })
@@ -530,7 +692,7 @@ async function getChatHistory(dbUserId: number, limit: number = 10): Promise<Arr
 async function clearChatHistory(dbUserId: number) {
   try {
     const { error } = await supabase
-      .from('chat_history')
+      .from('conversation_history')
       .delete()
       .eq('user_id', dbUserId)
     
@@ -1175,7 +1337,7 @@ ${profileData.wishes ? `- Пожелания клиента: "${profileData.wish
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'gpt-4o-mini',
+        model: 'gpt-5-nano',
         messages: [
           {
             role: 'system',
@@ -1186,9 +1348,7 @@ ${profileData.wishes ? `- Пожелания клиента: "${profileData.wish
             content: prompt
           }
         ],
-        temperature: 0.7,
-        response_format: { type: 'json_object' },
-        max_tokens: 1000
+        max_completion_tokens: 1000
       })
     })
     if (!response.ok) {
@@ -1223,7 +1383,7 @@ async function adjustNutritionPlan(currentPlan: any, userRequest: string, profil
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: 'gpt-4o-mini',
+      model: 'gpt-5-nano',
       messages: [
         {
           role: 'system',
@@ -1234,9 +1394,7 @@ async function adjustNutritionPlan(currentPlan: any, userRequest: string, profil
           content: prompt
         }
       ],
-      temperature: 0.7,
-      response_format: { type: 'json_object' },
-      max_tokens: 500
+      max_completion_tokens: 500
     })
   })
   const data = await response.json()
@@ -1325,7 +1483,8 @@ function getMainKeyboard() {
         { text: "📖 Рецепты" }
       ],
       [
-        { text: "👤 Профиль" }
+        { text: "👤 Профиль" },
+        { text: "❓ Помощь" }
       ]
     ],
     resize_keyboard: true,
@@ -3997,7 +4156,8 @@ async function handleNavigationButtons(message: TelegramMessage, user: any) {
         `**Кнопки:**\n` +
         `📊 **Дневник** - КБЖУ, вода, приемы пищи\n` +
         `📖 **Рецепты** - сохраненные шаблоны и рецепты\n` +
-        `👤 **Профиль** - настройки, цели, подписка\n\n` +
+        `👤 **Профиль** - настройки, цели, подписка\n` +
+        `❓ **Помощь** - инструкция по использованию бота\n\n` +
         `**Сохранение рецептов:**\n` +
         `Когда я предлагаю рецепт, под сообщением появятся кнопки:\n` +
         `• 📖 Сохранить рецепт\n` +
@@ -4006,7 +4166,8 @@ async function handleNavigationButtons(message: TelegramMessage, user: any) {
         `**Подсказка:** Я запоминаю контекст разговора, как ChatGPT!`,
         {
           inline_keyboard: [
-            [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+            [{ text: "🏠 Главное меню", callback_data: "main_menu" }],
+            [{ text: "💝 Поддержать проект", callback_data: "support_project" }]
           ]
         }
       )
@@ -4058,6 +4219,23 @@ async function handleMealEdit(userId: number, chatId: number, dbUserId: number, 
     const prompt = `Ты - C.I.D., AI-диетолог. Проанализируй прием пищи клиента.
 Описание: "${newDescription}"
 Дневной план: ${plan.calories} ккал (Б: ${plan.protein}г, Ж: ${plan.fats}г, У: ${plan.carbs}г)
+⚠️ ИСПОЛЬЗУЙ СТАНДАРТНЫЕ ТАБЛИЦЫ БЖУ:
+- Тунец запеченный/отварной: ~130-150 ккал/100г, Б: 28-30г, Ж: 1-2г, У: 0г
+- Куриная грудка: ~110 ккал/100г, Б: 23г, Ж: 1.2г
+- Рис отварной: ~130 ккал/100г, Б: 2.7г, Ж: 0.3г, У: 28г
+- Фетакса (сыр фета): ~260 ккал/100г, Б: 16г, Ж: 21г, У: 1г
+- Овощи свежие: ~15-20 ккал/100г
+- Творог обезжиренный (0-2%): ~70-80 ккал/100г, Б: 16-18г, Ж: 0.5-2г, У: 2-3г
+- Греческий йогурт 0%: ~60-70 ккал/100г, Б: 10-11г, Ж: 0-0.5г, У: 4-5г
+- Орехи (миндаль, грецкий, кешью): ~600-650 ккал/100г, Б: 15-20г, Ж: 50-60г, У: 10-15г
+- Арахис: ~550 ккал/100г, Б: 26г, Ж: 45г, У: 10г
+⚠️ ПРИМЕРЫ РАСЧЕТОВ (СТРОГО СЛЕДУЙ):
+Пример 1: "Орехи 70г"
+- На 100г: 620 ккал, Б:18г, Ж:55г, У:12г
+- На 70г: 620*0.7=434 ккал, Б:12.6г, Ж:38.5г, У:8.4г
+Пример 2: "Творог 250г"
+- На 100г: 75 ккал, Б:17г, Ж:1г, У:2.5г
+- На 250г: 187.5 ккал, Б:42.5г, Ж:2.5г, У:6.25г
 Задачи:
 1. Рассчитай КБЖУ этого приема
 2. Распиши детализацию по каждому продукту (название, вес, КБЖУ)
@@ -4087,19 +4265,51 @@ async function handleMealEdit(userId: number, chatId: number, dbUserId: number, 
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'gpt-4o-mini',
+        model: 'gpt-5-nano',
         messages: [
-          { role: 'system', content: 'Ты C.I.D. - AI-диетолог. Анализируешь питание и даешь рекомендации. ОБЯЗАТЕЛЬНО используй стандартные таблицы БЖУ для точных расчетов. Будь последовательным - одинаковые продукты всегда имеют одинаковую калорийность на 100г.' },
+          { role: 'system', content: 'Ты C.I.D. - AI-диетолог. КРИТИЧЕСКИ ВАЖНО: СТРОГО используй ТОЛЬКО таблицы БЖУ из инструкций для расчетов. НЕ придумывай значения. Для орехов ВСЕГДА: ~620 ккал/100г, Ж:55г (МНОГО жиров!), У:12г (мало углеводов!). Пример: 70г орехов = 434 ккал, Ж:38.5г, У:8.4г. Будь математически точным при умножении на вес.' },
           { role: 'user', content: prompt }
         ],
-        temperature: 0.3,
-        response_format: { type: 'json_object' },
-        max_tokens: 500
+        max_completion_tokens: 500
       })
     })
     const data = await response.json()
-    const analysis = JSON.parse(data.choices[0].message.content)
-    
+    console.log('OpenAI response for food editing:', JSON.stringify(data))
+
+    // Парсим JSON с обработкой ошибок
+    let rawAnalysis
+    try {
+      let content = data.choices[0]?.message?.content || ''
+      if (!content.trim()) {
+        throw new Error('Empty response from API')
+      }
+      // Очищаем от возможных markdown блоков
+      content = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
+      rawAnalysis = JSON.parse(content)
+    } catch (parseError) {
+      console.error('JSON parsing error:', parseError)
+      console.error('Raw content:', data.choices[0]?.message?.content)
+      await sendMessage(chatId, "❌ Не удалось обработать ответ. Попробуй еще раз.", {
+        inline_keyboard: [[{ text: "🏠 Главное меню", callback_data: "main_menu" }]]
+      })
+      await clearUserState(userId)
+      return
+    }
+
+    // ⚡ ВАЛИДАЦИЯ И АВТОКОРРЕКЦИЯ КБЖУ
+    const validated = validateNutrition(rawAnalysis)
+    console.log('Validated nutrition (edit):', JSON.stringify(validated))
+
+    // Используем исправленные значения
+    const analysis = {
+      ...rawAnalysis,
+      calories: validated.calories,
+      protein: validated.protein,
+      fats: validated.fats,
+      carbs: validated.carbs,
+      breakdown: validated.breakdown
+    }
+
     // Обновляем запись
     const { error } = await supabase
       .from('food_logs')
@@ -4112,11 +4322,11 @@ async function handleMealEdit(userId: number, chatId: number, dbUserId: number, 
       })
       .eq('id', mealId)
       .eq('user_id', dbUserId)
-    
+
     if (error) {
       throw error
     }
-    
+
     // Формируем детализацию
     let breakdownText = ''
     if (analysis.breakdown && analysis.breakdown.length > 0) {
@@ -4126,13 +4336,19 @@ async function handleMealEdit(userId: number, chatId: number, dbUserId: number, 
         breakdownText += `\n   🔥 ${item.calories} ккал | 🥩 Б: ${item.protein}г | 🥑 Ж: ${item.fats}г | 🍞 У: ${item.carbs}г`
       })
     }
-    
+
+    // Формируем заметки об автокоррекции
+    let validationText = ''
+    if (validated.corrected && validated.notes.length > 0) {
+      validationText = `\n\n⚠️ **Автокоррекция:**\n${validated.notes.join('\n')}`
+    }
+
     const resultText = `✅ Прием пищи обновлен!
 🔥 Калории: ${analysis.calories} ккал
 🥩 Белки: ${analysis.protein}г
 🥑 Жиры: ${analysis.fats}г
 🍞 Углеводы: ${analysis.carbs}г${breakdownText}
-💬 ${analysis.comment}`
+💬 ${analysis.comment}${validationText}`
     
     await sendMessage(chatId, resultText, {
       inline_keyboard: [
@@ -4436,35 +4652,44 @@ async function handleFoodLogging(userId: number, chatId: number, dbUserId: numbe
 - Рис отварной: ~130 ккал/100г, Б: 2.7г, Ж: 0.3г, У: 28г
 - Фетакса (сыр фета): ~260 ккал/100г, Б: 16г, Ж: 21г, У: 1г
 - Овощи свежие (огурцы/помидоры): ~15-20 ккал/100г
+- Творог обезжиренный (0-2%): ~70-80 ккал/100г, Б: 16-18г, Ж: 0.5-2г, У: 2-3г
+- Греческий йогурт 0%: ~60-70 ккал/100г, Б: 10-11г, Ж: 0-0.5г, У: 4-5г
+- Орехи (миндаль, грецкий, кешью): ~600-650 ккал/100г, Б: 15-20г, Ж: 50-60г, У: 10-15г
+- Арахис: ~550 ккал/100г, Б: 26г, Ж: 45г, У: 10г
 ⚠️ БУДЬ ПОСЛЕДОВАТЕЛЬНЫМ:
 - Одинаковые продукты ВСЕГДА должны иметь одинаковую калорийность на 100г
 - Используй точные данные из таблиц БЖУ, не придумывай значения
 - Для "запеченного тунца" ВСЕГДА используй ~130-150 ккал/100г
+⚠️ НЕКАЛОРИЙНЫЕ НАПИТКИ (0 калорий):
+- Вода (обычная, минеральная, газированная) - ВСЕГДА 0 калорий
+- Чай заваренный без сахара и молока - ВСЕГДА 0 калорий
+- Кофе заваренный/эспрессо без сахара и молока (ЖИДКИЙ напиток) - ВСЕГДА 0 калорий
+- НЕ ВКЛЮЧАЙ эти напитки в breakdown и не учитывай в общей сумме КБЖУ
+⚠️ НИЗКОКАЛОРИЙНЫЕ ПРОДУКТЫ (учитывать):
+- Растворимый кофе (ПОРОШОК): ~3-5 ккал на чайную ложку
+- Чайные листья/порошок: минимальные калории, но учитывай если указан вес
+- ВАЖНО: Если пользователь указал "растворимый кофе 2 ч.л." - это ПРОДУКТ, а не напиток! Считай калории!
 Примеры:
 ✅ "тарелка супа 250мл, салат 350г" → есть вес, считай КБЖУ
 ✅ "банан 150г" → есть вес, считай
 ✅ "порция курицы 200г" → есть вес, считай
+✅ "яйца 2 шт, кофе 200 мл" → считай только яйца, заваренный кофе игнорируй (0 ккал)
+✅ "растворимый кофе 2 ч.л." → считай! (~8-10 ккал)
+✅ "вода 500 мл" → не считай, верни need_clarification
 ❌ "банан" → нет веса, запроси уточнение
-⚠️ НИКОГДА не возвращай 0 калорий если есть информация о количестве!
+⚠️ ФОРМАТ ОТВЕТА: Валидный JSON. В текстовых полях используй только одну строку без переносов!
 Верни JSON:
 {
   "need_clarification": true/false,
-  "clarification_question": "вопрос если нужно уточнение",
+  "clarification_question": "вопрос",
   "calories": число,
   "protein": число,
   "fats": число,
   "carbs": число,
   "breakdown": [
-    {
-      "product": "название продукта",
-      "weight": "вес с единицей измерения",
-      "calories": число,
-      "protein": число,
-      "fats": число,
-      "carbs": число
-    }
+    {"product": "название", "weight": "вес", "calories": число, "protein": число, "fats": число, "carbs": число}
   ],
-  "comment": "краткий комментарий"
+  "comment": "краткая фраза"
 }`
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
@@ -4473,32 +4698,103 @@ async function handleFoodLogging(userId: number, chatId: number, dbUserId: numbe
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'gpt-4o-mini',
+        model: 'gpt-5-nano',
         messages: [
-          { role: 'system', content: 'Ты C.I.D. - AI-диетолог. Анализируешь питание и даешь рекомендации. ОБЯЗАТЕЛЬНО используй стандартные таблицы БЖУ для точных расчетов. Будь последовательным - одинаковые продукты всегда имеют одинаковую калорийность на 100г.' },
+          { role: 'system', content: 'Ты C.I.D. - AI-диетолог. КРИТИЧЕСКИ ВАЖНО: СТРОГО используй ТОЛЬКО таблицы БЖУ из инструкций для расчетов. НЕ придумывай значения. Для орехов ВСЕГДА: ~620 ккал/100г, Ж:55г (МНОГО жиров!), У:12г (мало углеводов!). Пример: 70г орехов = 434 ккал, Ж:38.5г, У:8.4г. Будь математически точным при умножении на вес. ВАЖНО: Возвращай ТОЛЬКО валидный JSON. В текстовых полях НЕ используй переносы строк - заменяй их на пробелы. Все кавычки внутри строк экранируй.' },
           { role: 'user', content: prompt }
         ],
-        temperature: 0.3,
-        response_format: { type: 'json_object' },
-        max_tokens: 500
+        max_completion_tokens: 1000  // Увеличено для больших списков продуктов
       })
     })
     const data = await response.json()
     console.log('OpenAI response for food logging:', JSON.stringify(data))
-    
-    const analysis = JSON.parse(data.choices[0].message.content)
-    console.log('Parsed analysis:', JSON.stringify(analysis))
-    
-    // ВАЛИДАЦИЯ: Если calories === 0 или undefined, значит что-то пошло не так
-    if (!analysis.calories || analysis.calories === 0) {
-      console.error('Invalid analysis result - zero calories:', analysis)
-      await sendMessage(chatId, "❌ Не удалось проанализировать еду. Попробуй описать более детально (укажи примерный вес продуктов).")
+
+    // Парсим JSON с обработкой ошибок
+    let rawAnalysis
+    try {
+      let content = data.choices[0].message.content
+      // Очищаем от возможных markdown блоков
+      content = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
+
+      rawAnalysis = JSON.parse(content)
+      console.log('Parsed analysis:', JSON.stringify(rawAnalysis))
+    } catch (parseError) {
+      console.error('JSON parsing error:', parseError)
+      console.error('Raw content:', data.choices[0].message.content)
+
+      await sendMessage(chatId, "❌ Не удалось обработать ответ. Попробуй описать проще или разбить на несколько приемов пищи.", {
+        inline_keyboard: [[{ text: "🏠 Главное меню", callback_data: "main_menu" }]]
+      })
       await clearUserState(userId)
       return
     }
-    
+
+    // ⚡ ВАЛИДАЦИЯ И АВТОКОРРЕКЦИЯ КБЖУ
+    const validated = validateNutrition(rawAnalysis)
+    console.log('Validated nutrition:', JSON.stringify(validated))
+
+    // Используем исправленные значения
+    const analysis = {
+      ...rawAnalysis,
+      calories: validated.calories,
+      protein: validated.protein,
+      fats: validated.fats,
+      carbs: validated.carbs,
+      breakdown: validated.breakdown
+    }
+
+    // 🚰 ПРОВЕРКА: Если calories === 0 и нет breakdown - это только некалорийные напитки
+    if ((!analysis.calories || analysis.calories === 0) && (!analysis.breakdown || analysis.breakdown.length === 0)) {
+      console.log('Zero calories and no breakdown - only zero-calorie drinks')
+      await clearUserState(userId)
+      await sendMessage(chatId, "🤔 Похоже, ты указал только напитки без калорий (вода, заваренный чай/кофе). Напиши, что ты поел/выпил из еды с калориями?", {
+        inline_keyboard: [[{ text: "🏠 Главное меню", callback_data: "main_menu" }]]
+      })
+      return
+    }
+
+    // 🚰 ФИЛЬТРАЦИЯ НЕКАЛОРИЙНЫХ НАПИТКОВ
+    // Исключаем продукты с 0 калорий из breakdown (вода, чай, кофе без добавок)
+    if (analysis.breakdown && Array.isArray(analysis.breakdown)) {
+      const filteredBreakdown = analysis.breakdown.filter((item: any) => {
+        const hasCalories = item.calories && item.calories > 0
+        if (!hasCalories) {
+          console.log('Filtering out zero-calorie item:', item.product)
+        }
+        return hasCalories
+      })
+
+      // Если после фильтрации ничего не осталось - запрашиваем уточнение
+      if (filteredBreakdown.length === 0) {
+        console.log('All items were zero-calorie, requesting clarification')
+        await clearUserState(userId)
+        await sendMessage(chatId, "🤔 Похоже, ты указал только напитки без калорий (вода, заваренный чай/кофе). Напиши, что ты поел/выпил из еды с калориями?", {
+          inline_keyboard: [[{ text: "🏠 Главное меню", callback_data: "main_menu" }]]
+        })
+        return
+      }
+
+      analysis.breakdown = filteredBreakdown
+
+      // Пересчитываем сумму КБЖУ на основе отфильтрованного breakdown (для надежности)
+      const recalculated = filteredBreakdown.reduce((sum: any, item: any) => ({
+        calories: sum.calories + (item.calories || 0),
+        protein: sum.protein + (item.protein || 0),
+        fats: sum.fats + (item.fats || 0),
+        carbs: sum.carbs + (item.carbs || 0)
+      }), { calories: 0, protein: 0, fats: 0, carbs: 0 })
+
+      // Округляем до 1 знака после запятой
+      analysis.calories = Math.round(recalculated.calories * 10) / 10
+      analysis.protein = Math.round(recalculated.protein * 10) / 10
+      analysis.fats = Math.round(recalculated.fats * 10) / 10
+      analysis.carbs = Math.round(recalculated.carbs * 10) / 10
+
+      console.log('Recalculated totals after filtering zero-calorie items:', recalculated)
+    }
+
     // Разрешаем уточнение только один раз
-    if (analysis.need_clarification && clarificationAttempt === 0) {
+    if (rawAnalysis.need_clarification && clarificationAttempt === 0) {
       // ВАЖНО: сохраняем исходное описание еды!
       await setUserState(userId, 'logging_food', { 
         clarification_attempt: 1,
@@ -4573,11 +4869,17 @@ async function handleFoodLogging(userId: number, chatId: number, dbUserId: numbe
       }
     }
 
+    // Формируем заметки об автокоррекции
+    let validationText = ''
+    if (validated.corrected && validated.notes.length > 0) {
+      validationText = `\n\n⚠️ **Автокоррекция:**\n${validated.notes.join('\n')}`
+    }
+
     const resultText = `✅ **Прием пищи записан!**
 📝 ${foodDescription}
 🔥 ${analysis.calories} ккал | 🥩 Б: ${analysis.protein}г | 🥑 Ж: ${analysis.fats}г | 🍞 У: ${analysis.carbs}г${breakdownText}
 ⏰ ${timeStr}
-💬 ${analysis.comment}${streakText}
+💬 ${analysis.comment}${validationText}${streakText}
 💡 **Совет:** В следующий раз можешь просто 📸 сфотографировать еду!`
     
     // 🔥 ОПТИМИЗИРОВАННЫЕ Post-action buttons
@@ -4908,10 +5210,9 @@ ${userPreferences.length > 0 ? `
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            model: 'gpt-4o-mini',
+            model: 'gpt-5-nano',
             messages: messages,
-            temperature: 0.7, // Понижено для более точной обработки контекста
-            max_tokens: 2500 // Увеличено для полноценных развернутых ответов с рационами
+            max_completion_tokens: 2500 // Увеличено для полноценных развернутых ответов с рационами
           })
         },
         3, // maxRetries
@@ -5051,7 +5352,11 @@ async function analyzeFoodPhoto(photoUrl: string, caption?: string): Promise<any
 2. Примерный вес/объем каждого продукта в граммах
 3. Калории, белки, жиры, углеводы для каждого продукта
 ${caption ? `Дополнительная информация от пользователя: ${caption}` : ''}
-ВАЖНО: Это примерная оценка на основе визуального анализа. Точность может быть невысокой.
+ВАЖНО:
+- Это примерная оценка на основе визуального анализа. Точность может быть невысокой.
+- НЕ ВКЛЮЧАЙ некалорийные напитки (вода, заваренный чай/кофе) в items и total
+- Для таких напитков делай примечание в notes
+- УЧИТЫВАЙ растворимый кофе/чай в порошке если виден на фото (~5 ккал на чайную ложку)
 Ответь в формате JSON:
 {
   "items": [
@@ -5080,7 +5385,7 @@ ${caption ? `Дополнительная информация от пользо
       'Authorization': `Bearer ${OPENAI_API_KEY}`
     },
     body: JSON.stringify({
-      model: 'gpt-4o',
+      model: 'gpt-5-nano',
       messages: [
         {
           role: 'user',
@@ -5098,8 +5403,7 @@ ${caption ? `Дополнительная информация от пользо
           ]
         }
       ],
-      max_tokens: 1000,
-      temperature: 0.3
+      max_completion_tokens: 1000,
     })
   })
   
@@ -5424,6 +5728,8 @@ async function showProfileMenu(chatId: number, dbUserId: number) {
         .rpc('get_user_streak_stats', { p_user_id: dbUserId })
         .single()
 
+      console.log('Streak stats:', { streakStats, streakError })
+
       if (!streakError && streakStats) {
         profileText += `🔥 **Твой Streak:**\n`
         profileText += `• Текущий: **${streakStats.current_streak}** ${streakStats.current_streak === 1 ? 'день' : streakStats.current_streak < 5 ? 'дня' : 'дней'}\n`
@@ -5437,10 +5743,34 @@ async function showProfileMenu(chatId: number, dbUserId: number) {
         // Показываем достижения если есть
         if (streakStats.achievements && streakStats.achievements.length > 0) {
           const achievementsCount = streakStats.achievements.length
-          profileText += `\n🏆 Достижений: **${achievementsCount}**\n`
+          profileText += `\n🏆 **Достижения (${achievementsCount}):**\n`
+
+          // Показываем последние 5 достижений
+          const recentAchievements = streakStats.achievements.slice(0, 5)
+          for (const achievement of recentAchievements) {
+            const icon = achievement.type === 'streak_3' ? '🔥' :
+                        achievement.type === 'streak_7' ? '⭐' :
+                        achievement.type === 'streak_14' ? '💫' :
+                        achievement.type === 'streak_30' ? '🌟' :
+                        achievement.type === 'streak_100' ? '👑' :
+                        achievement.type === 'total_logs_10' ? '📊' :
+                        achievement.type === 'total_logs_50' ? '📈' :
+                        achievement.type === 'total_logs_100' ? '🎯' : '🏆'
+
+            profileText += `${icon} **${achievement.name}** — ${achievement.description}\n`
+          }
+
+          if (achievementsCount > 5) {
+            profileText += `_...и еще ${achievementsCount - 5}_\n`
+          }
         }
 
         profileText += `\n`
+      } else if (streakError) {
+        console.error('Streak error details:', streakError)
+        // Показываем хотя бы базовую информацию
+        profileText += `🔥 **Твой Streak:**\n`
+        profileText += `• Начни логировать еду, чтобы набрать серию!\n\n`
       }
     } catch (error) {
       console.error('Error getting streak stats:', error)
