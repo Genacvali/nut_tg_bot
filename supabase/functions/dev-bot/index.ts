@@ -212,6 +212,51 @@ async function detectIntentWithContext(
   history: ConversationMessage[]
 ): Promise<IntentResult> {
   try {
+    // 🚀 FAST-PATH: Простые случаи без LLM
+    const lowerText = text.toLowerCase().trim()
+
+    // Детекция граммовки/веса - это почти всегда еда
+    const hasWeight = /\d+\s*(г|гр|грам|грамм|кг|мл|шт|штук|порци|тарелк)/i.test(text)
+    const hasComma = text.includes(',') || text.includes(' и ')
+    const hasFoodVerbs = /(съел|поел|выпил|скушал|перекусил|позавтракал|пообедал|поужинал)/i.test(lowerText)
+
+    // Быстрый путь для еды
+    if (hasWeight || (hasFoodVerbs && !lowerText.includes('?'))) {
+      console.log('Fast-path: Detected as food without LLM', { text, hasWeight, hasFoodVerbs })
+      return {
+        intent: 'food',
+        confidence: 0.95,
+        reasoning: 'Fast detection: weight/food verbs present',
+        needsConfirmation: false
+      }
+    }
+
+    // Детекция воды
+    const waterPatterns = /\d+\s*(л|литр|мл|миллилитр)\b/i
+    const hasWaterWords = /(вод|жидкост|попил|выпил.*вод)/i.test(lowerText)
+    if (waterPatterns.test(lowerText) && hasWaterWords) {
+      console.log('Fast-path: Detected as water without LLM')
+      return {
+        intent: 'water',
+        confidence: 0.95,
+        reasoning: 'Fast detection: water volume present',
+        needsConfirmation: false
+      }
+    }
+
+    // Явные вопросы
+    const hasQuestionMark = text.includes('?')
+    const hasQuestionWords = /^(что|как|где|когда|почему|зачем|какой|можно|стоит)/i.test(lowerText)
+    if (hasQuestionMark || hasQuestionWords) {
+      console.log('Fast-path: Detected as question without LLM')
+      return {
+        intent: 'question',
+        confidence: 0.9,
+        reasoning: 'Fast detection: question markers present',
+        needsConfirmation: false
+      }
+    }
+
     // Формируем контекст из истории
     const contextMessages = history.slice(-5).map(msg =>
       `${msg.role === 'user' ? 'Пользователь' : 'Ассистент'}: ${msg.content}`
@@ -273,28 +318,63 @@ ${contextMessages || 'Нет предыдущих сообщений'}
   "needsConfirmation": true | false
 }`
 
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${OPENAI_API_KEY}`
-      },
-      body: JSON.stringify({
-        model: 'gpt-5-nano',
-        messages: [
-          { role: 'user', content: prompt }
-        ],
-        max_completion_tokens: 150
+    // Вспомогательная функция для вызова API с разными параметрами
+    async function callOpenAI(maxTokens: number): Promise<any> {
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${OPENAI_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: 'gpt-5-nano',
+          messages: [{ role: 'user', content: prompt }],
+          max_completion_tokens: maxTokens,
+          reasoning_effort: 'low'  // Снижаем reasoning токены для GPT-5
+        })
       })
+
+      if (!response.ok) {
+        throw new Error(`OpenAI API error: ${response.status}`)
+      }
+
+      return await response.json()
+    }
+
+    // Первая попытка с обычным лимитом
+    let data = await callOpenAI(300)
+    let choice = data.choices?.[0]
+    let content = (choice?.message?.content ?? '').trim()
+    let finishReason = choice?.finish_reason
+
+    console.log('Intent detection attempt 1:', {
+      finishReason,
+      contentLength: content.length,
+      reasoningTokens: data.usage?.completion_tokens_details?.reasoning_tokens
     })
 
-    const data = await response.json()
+    // Если контент пустой или обрезан - повторяем с большим лимитом
+    if (!content || finishReason === 'length') {
+      console.log('Retrying with increased token limit...')
+      data = await callOpenAI(600)
+      choice = data.choices?.[0]
+      content = (choice?.message?.content ?? '').trim()
+      finishReason = choice?.finish_reason
+
+      console.log('Intent detection attempt 2:', {
+        finishReason,
+        contentLength: content.length
+      })
+    }
 
     if (!data.choices || !data.choices[0]) {
       throw new Error('Invalid OpenAI response')
     }
 
-    const content = data.choices[0].message.content.trim()
+    if (!content) {
+      throw new Error('Empty content from OpenAI after retry')
+    }
+
     // Убираем markdown если есть
     const jsonContent = content.replace(/```json\n?|\n?```/g, '').trim()
     const result: IntentResult = JSON.parse(jsonContent)
@@ -1479,12 +1559,11 @@ function getMainKeyboard() {
   return {
     keyboard: [
       [
-        { text: "📊 Дневник" },
-        { text: "📖 Рецепты" }
+        { text: "📊 Сегодня" },
+        { text: "📚 Рецепты" }
       ],
       [
-        { text: "👤 Профиль" },
-        { text: "❓ Помощь" }
+        { text: "👤 Профиль" }
       ]
     ],
     resize_keyboard: true,
@@ -1705,8 +1784,16 @@ function myDayActionsKeyboard() {
   return {
     inline_keyboard: [
       [
-        { text: "📝 Мои приемы", callback_data: "manage_meals" },
-        { text: "⚡ Быстрый лог", callback_data: "quick_log" }
+        { text: "➕ Записать еду", callback_data: "quick_log" }
+      ],
+      [
+        { text: "💧 +250мл", callback_data: "log_water_250" },
+        { text: "💧 +500мл", callback_data: "log_water_500" },
+        { text: "💧 +1л", callback_data: "log_water_1000" }
+      ],
+      [
+        { text: "📝 Все приемы", callback_data: "manage_meals" },
+        { text: "📊 Дневник", callback_data: "diary" }
       ],
       [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
     ]
@@ -1818,6 +1905,48 @@ async function handleStartCommand(message: TelegramMessage) {
   // Отправляем главное меню отдельным сообщением
   await sendMessage(message.chat.id, "🏠 **Главное меню**", getMainKeyboard())
 }
+
+/**
+ * Обработка команды /help
+ */
+async function handleHelpCommand(chatId: number) {
+  const helpText = `❓ **Помощь по C.I.D.**
+
+📱 **Как пользоваться ботом:**
+
+🍽️ **Записать еду:**
+Просто напиши что съел: "съел банан 150г" или "завтрак: яичница 2 яйца"
+
+💧 **Вода:**
+Пиши "выпил 500мл" или используй быстрые кнопки в дневнике
+
+📸 **Фото еды:**
+Отправь фото блюда - бот автоматически распознает и рассчитает КБЖУ
+
+🎤 **Голос:**
+Наговори сообщение вместо печати - бот распознает речь
+
+📊 **Дневник:**
+Кнопка "📊 Сегодня" - смотри прогресс и статистику за день
+
+📚 **Рецепты:**
+Сохраняй блюда как шаблоны для быстрого логирования
+
+👤 **Профиль:**
+Управляй планом КБЖУ, весом и настройками
+
+💡 **Совет:** Задавай вопросы о питании прямо в чат!
+
+Нужна дополнительная помощь? Напиши "@username" разработчику`
+
+  await sendMessage(chatId, helpText, {
+    inline_keyboard: [
+      [{ text: "💝 Поддержать проект", url: "https://t.me/your_support_link" }],
+      [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+    ]
+  })
+}
+
 /**
  * Обработка callback query
  */
@@ -2492,7 +2621,13 @@ async function handleCallbackQuery(callbackQuery: TelegramCallbackQuery) {
   else if (data === 'manage_meals') {
     await manageMeals(chatId, user.id)
   }
-  
+
+  // Пагинация приемов пищи
+  else if (data.startsWith('meals_page_')) {
+    const page = parseInt(data.split('_')[2])
+    await manageMeals(chatId, user.id, page)
+  }
+
   // Удаление приема пищи (показать подтверждение)
   else if (data.startsWith('delete_meal_')) {
     const mealId = parseInt(data.split('_')[2])
@@ -3350,7 +3485,7 @@ async function handleTextMessage(message: TelegramMessage) {
   // Сначала проверяем навигационные кнопки (они работают без состояния)
   const navigationButtons = [
     // Новые кнопки главного меню (3 кнопки)
-    '📊 Дневник', '📖 Рецепты', '⚙️ Настройки',
+    '📊 Дневник', '📖 Рецепты', '⚙️ Настройки', '📊 Сегодня', '📚 Рецепты',
     // Старые кнопки (для обратной совместимости)
     '💧 Вода', '📊 Мой день', '📖 Моё меню', '❓ Помощь',
     '🔙 Назад', '💬 Диалог с C.I.D.',
@@ -4089,10 +4224,12 @@ async function handleNavigationButtons(message: TelegramMessage, user: any) {
       break
 
     // 🔥 НОВЫЕ ГЛАВНЫЕ КНОПКИ (3 шт)
+    case '📊 Сегодня':
     case '📊 Дневник':
       await showDiary(chatId, user.id)
       break
 
+    case '📚 Рецепты':
     case '📖 Рецепты':
       await sendMessage(
         chatId,
@@ -4142,35 +4279,9 @@ async function handleNavigationButtons(message: TelegramMessage, user: any) {
       )
       break
 
-    // 🔥 Кнопка: Помощь (мануал)
+    // 🔥 Кнопка: Помощь (для обратной совместимости)
     case '❓ Помощь':
-      await sendMessage(
-        chatId,
-        `❓ **Помощь**\n\n` +
-        `**Умный чат:**\n` +
-        `Просто пиши в чат - я сам пойму что делать!\n` +
-        `• "съел овсянку 60г, банан" → запишу прием\n` +
-        `• "выпил 500мл воды" → запишу воду\n` +
-        `• "что на ужин?" → дам рецепт\n` +
-        `• "я не ем рыбу" → запомню предпочтения\n\n` +
-        `**Кнопки:**\n` +
-        `📊 **Дневник** - КБЖУ, вода, приемы пищи\n` +
-        `📖 **Рецепты** - сохраненные шаблоны и рецепты\n` +
-        `👤 **Профиль** - настройки, цели, подписка\n` +
-        `❓ **Помощь** - инструкция по использованию бота\n\n` +
-        `**Сохранение рецептов:**\n` +
-        `Когда я предлагаю рецепт, под сообщением появятся кнопки:\n` +
-        `• 📖 Сохранить рецепт\n` +
-        `• 🍽 Записать как прием\n` +
-        `• 💾 Сохранить по отдельности (для рационов)\n\n` +
-        `**Подсказка:** Я запоминаю контекст разговора, как ChatGPT!`,
-        {
-          inline_keyboard: [
-            [{ text: "🏠 Главное меню", callback_data: "main_menu" }],
-            [{ text: "💝 Поддержать проект", callback_data: "support_project" }]
-          ]
-        }
-      )
+      await handleHelpCommand(chatId)
       break
 
     // СТАРЫЕ КНОПКИ (для обратной совместимости)
@@ -4229,6 +4340,9 @@ async function handleMealEdit(userId: number, chatId: number, dbUserId: number, 
 - Греческий йогурт 0%: ~60-70 ккал/100г, Б: 10-11г, Ж: 0-0.5г, У: 4-5г
 - Орехи (миндаль, грецкий, кешью): ~600-650 ккал/100г, Б: 15-20г, Ж: 50-60г, У: 10-15г
 - Арахис: ~550 ккал/100г, Б: 26г, Ж: 45г, У: 10г
+- Леденцы, сосательные конфеты: ~400 ккал/100г или ~25-30 ккал за 1 шт (7-8г), Б: 0г, Ж: 0г, У: 98г/100г
+- Шоколадные конфеты: ~500-550 ккал/100г или ~50-60 ккал за 1 шт, Б: 3-5г, Ж: 30-35г, У: 50-60г
+- Мармелад: ~300-350 ккал/100г, Б: 0г, Ж: 0г, У: 80-85г
 ⚠️ ПРИМЕРЫ РАСЧЕТОВ (СТРОГО СЛЕДУЙ):
 Пример 1: "Орехи 70г"
 - На 100г: 620 ккал, Б:18г, Ж:55г, У:12г
@@ -4267,7 +4381,7 @@ async function handleMealEdit(userId: number, chatId: number, dbUserId: number, 
       body: JSON.stringify({
         model: 'gpt-5-nano',
         messages: [
-          { role: 'system', content: 'Ты C.I.D. - AI-диетолог. КРИТИЧЕСКИ ВАЖНО: СТРОГО используй ТОЛЬКО таблицы БЖУ из инструкций для расчетов. НЕ придумывай значения. Для орехов ВСЕГДА: ~620 ккал/100г, Ж:55г (МНОГО жиров!), У:12г (мало углеводов!). Пример: 70г орехов = 434 ккал, Ж:38.5г, У:8.4г. Будь математически точным при умножении на вес.' },
+          { role: 'system', content: 'Ты C.I.D. - AI-диетолог. КРИТИЧЕСКИ ВАЖНО: СТРОГО используй ТОЛЬКО таблицы БЖУ из инструкций для расчетов. НЕ придумывай значения. Для орехов ВСЕГДА: ~620 ккал/100г, Ж:55г, У:12г. Для леденцов и сосательных конфет: ~25-30 ккал за 1 шт, У:7г, Б:0г, Ж:0г. НИКОГДА не считай леденцы как 0 калорий! Будь математически точным при умножении на вес.' },
           { role: 'user', content: prompt }
         ],
         max_completion_tokens: 500
@@ -4656,6 +4770,9 @@ async function handleFoodLogging(userId: number, chatId: number, dbUserId: numbe
 - Греческий йогурт 0%: ~60-70 ккал/100г, Б: 10-11г, Ж: 0-0.5г, У: 4-5г
 - Орехи (миндаль, грецкий, кешью): ~600-650 ккал/100г, Б: 15-20г, Ж: 50-60г, У: 10-15г
 - Арахис: ~550 ккал/100г, Б: 26г, Ж: 45г, У: 10г
+- Леденцы, сосательные конфеты: ~400 ккал/100г или ~25-30 ккал за 1 шт (7-8г), Б: 0г, Ж: 0г, У: 98г/100г
+- Шоколадные конфеты: ~500-550 ккал/100г или ~50-60 ккал за 1 шт, Б: 3-5г, Ж: 30-35г, У: 50-60г
+- Мармелад, жевательные конфеты: ~300-350 ккал/100г, Б: 0г, Ж: 0г, У: 80-85г
 ⚠️ БУДЬ ПОСЛЕДОВАТЕЛЬНЫМ:
 - Одинаковые продукты ВСЕГДА должны иметь одинаковую калорийность на 100г
 - Используй точные данные из таблиц БЖУ, не придумывай значения
@@ -4675,6 +4792,9 @@ async function handleFoodLogging(userId: number, chatId: number, dbUserId: numbe
 ✅ "порция курицы 200г" → есть вес, считай
 ✅ "яйца 2 шт, кофе 200 мл" → считай только яйца, заваренный кофе игнорируй (0 ккал)
 ✅ "растворимый кофе 2 ч.л." → считай! (~8-10 ккал)
+✅ "леденец 1 шт" → считай! (~25-30 ккал, У: ~7г)
+✅ "сосательная конфета 1 шт" → считай! (~25-30 ккал, У: ~7г)
+✅ "шоколадная конфета 2 шт" → считай! (~100-120 ккал)
 ✅ "вода 500 мл" → не считай, верни need_clarification
 ❌ "банан" → нет веса, запроси уточнение
 ⚠️ ФОРМАТ ОТВЕТА: Валидный JSON. В текстовых полях используй только одну строку без переносов!
@@ -4700,27 +4820,104 @@ async function handleFoodLogging(userId: number, chatId: number, dbUserId: numbe
       body: JSON.stringify({
         model: 'gpt-5-nano',
         messages: [
-          { role: 'system', content: 'Ты C.I.D. - AI-диетолог. КРИТИЧЕСКИ ВАЖНО: СТРОГО используй ТОЛЬКО таблицы БЖУ из инструкций для расчетов. НЕ придумывай значения. Для орехов ВСЕГДА: ~620 ккал/100г, Ж:55г (МНОГО жиров!), У:12г (мало углеводов!). Пример: 70г орехов = 434 ккал, Ж:38.5г, У:8.4г. Будь математически точным при умножении на вес. ВАЖНО: Возвращай ТОЛЬКО валидный JSON. В текстовых полях НЕ используй переносы строк - заменяй их на пробелы. Все кавычки внутри строк экранируй.' },
+          { role: 'system', content: '🔥 КРИТИЧНО: "120гр"="120г"="120 грамм"! Если видишь "г", "гр", "грамм" - это ВЕС УКАЗАН! Считай КБЖУ, не спрашивай уточнение!\n\nТы C.I.D. - AI-диетолог. Используй таблицы БЖУ из инструкций. Для орехов: ~620 ккал/100г. Леденцы: ~25-30 ккал/шт. Возвращай ТОЛЬКО валидный JSON, одна строка в текстах.' },
           { role: 'user', content: prompt }
         ],
-        max_completion_tokens: 1000  // Увеличено для больших списков продуктов
+        max_completion_tokens: 1500,  // Увеличено для GPT-5-nano с reasoning
+        reasoning_effort: 'low'  // Снижаем reasoning токены
       })
     })
-    const data = await response.json()
+
+    // Проверяем статус ответа
+    if (!response.ok) {
+      const errorText = await response.text()
+      console.error('OpenAI API error:', response.status, errorText)
+      await sendMessage(chatId, "❌ Ошибка связи с AI. Попробуй еще раз через минуту.", {
+        inline_keyboard: [[{ text: "🏠 Главное меню", callback_data: "main_menu" }]]
+      })
+      await clearUserState(userId)
+      return
+    }
+
+    let data = await response.json()
     console.log('OpenAI response for food logging:', JSON.stringify(data))
 
     // Парсим JSON с обработкой ошибок
     let rawAnalysis
     try {
-      let content = data.choices[0].message.content
+      // Проверяем наличие ответа
+      if (!data.choices || !data.choices[0] || !data.choices[0].message) {
+        console.error('Invalid OpenAI response structure:', JSON.stringify(data))
+        throw new Error('Empty or invalid response from OpenAI')
+      }
+
+      let content = (data.choices[0].message.content ?? '').trim()
+      let finishReason = data.choices[0].finish_reason
+
+      console.log('Food logging attempt 1:', {
+        finishReason,
+        contentLength: content.length,
+        reasoningTokens: data.usage?.completion_tokens_details?.reasoning_tokens
+      })
+
+      // 🔥 RETRY если контент пустой или обрезан
+      if (!content || finishReason === 'length') {
+        console.log('⚠️ Empty or truncated response, retrying with 2500 tokens...')
+
+        const retryResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${OPENAI_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: 'gpt-5-nano',
+            messages: [
+              { role: 'system', content: '🔥 "120гр"="120г"="120 грамм"! Если видишь "г"/"гр"/"грамм" - ВЕС УКАЗАН! Считай КБЖУ!\n\nВозвращай ТОЛЬКО валидный JSON. Краток и точен.' },
+              { role: 'user', content: prompt }
+            ],
+            max_completion_tokens: 2500,
+            reasoning_effort: 'low'
+          })
+        })
+
+        if (retryResponse.ok) {
+          data = await retryResponse.json()
+          content = (data.choices[0]?.message?.content ?? '').trim()
+          finishReason = data.choices[0]?.finish_reason
+
+          console.log('Food logging attempt 2:', {
+            finishReason,
+            contentLength: content.length
+          })
+        }
+      }
+
+      console.log('Raw OpenAI content:', content)
+
+      // Проверяем что контент не пустой
+      if (!content || content.trim().length === 0) {
+        throw new Error('Empty content from OpenAI')
+      }
+
       // Очищаем от возможных markdown блоков
       content = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
+
+      // Пробуем извлечь JSON если он обрезан или окружен текстом
+      const jsonMatch = content.match(/\{[\s\S]*\}/)
+      if (jsonMatch) {
+        content = jsonMatch[0]
+      }
 
       rawAnalysis = JSON.parse(content)
       console.log('Parsed analysis:', JSON.stringify(rawAnalysis))
     } catch (parseError) {
       console.error('JSON parsing error:', parseError)
-      console.error('Raw content:', data.choices[0].message.content)
+      console.error('Raw OpenAI response:', JSON.stringify(data))
+
+      if (data.choices && data.choices[0] && data.choices[0].message) {
+        console.error('Raw content:', data.choices[0].message.content)
+      }
 
       await sendMessage(chatId, "❌ Не удалось обработать ответ. Попробуй описать проще или разбить на несколько приемов пищи.", {
         inline_keyboard: [[{ text: "🏠 Главное меню", callback_data: "main_menu" }]]
@@ -6002,15 +6199,17 @@ async function showSubscriptionMenu(chatId: number, dbUserId: number) {
   }
 }
 /**
- * Управление приемами пищи (за последние 2 дня)
+ * Управление приемами пищи (за последние 2 дня) с пагинацией
  */
-async function manageMeals(chatId: number, dbUserId: number) {
+async function manageMeals(chatId: number, dbUserId: number, page: number = 0) {
   try {
+    const MEALS_PER_PAGE = 5 // Показываем максимум 5 приемов за раз
+
     // Вычисляем дату 2 дня назад
     const twoDaysAgo = new Date()
     twoDaysAgo.setDate(twoDaysAgo.getDate() - 2)
     const startDate = twoDaysAgo.toISOString().split('T')[0]
-    
+
     // Получаем записи за последние 2 дня
     const { data: logs } = await supabase
       .from('food_logs')
@@ -6018,7 +6217,7 @@ async function manageMeals(chatId: number, dbUserId: number) {
       .eq('user_id', dbUserId)
       .gte('logged_at', `${startDate}T00:00:00`)
       .order('logged_at', { ascending: false })
-    
+
     if (!logs || logs.length === 0) {
       await sendMessage(chatId, "📝 **Нет записей за последние 2 дня**\n\nДобавь первый прием пищи!", {
         inline_keyboard: [
@@ -6028,20 +6227,20 @@ async function manageMeals(chatId: number, dbUserId: number) {
       })
       return
     }
-    
-    // Группируем записи по дням
-    const logsByDate: { [key: string]: any[] } = {}
-    logs.forEach(log => {
-      const date = new Date(log.logged_at).toISOString().split('T')[0]
-      if (!logsByDate[date]) {
-        logsByDate[date] = []
-      }
-      logsByDate[date].push(log)
-    })
-    
-    let message = `📝 **Приемы пищи за последние 2 дня**\n\n`
+
+    // Пагинация
+    const totalPages = Math.ceil(logs.length / MEALS_PER_PAGE)
+    const offset = page * MEALS_PER_PAGE
+    const pageLogs = logs.slice(offset, offset + MEALS_PER_PAGE)
+
+    let message = `📝 **Приемы пищи** (${logs.length} шт.)\n`
+    if (totalPages > 1) {
+      message += `Стр. ${page + 1} из ${totalPages}\n`
+    }
+    message += `\n`
+
     const keyboard: any = { inline_keyboard: [] }
-    
+
     // Форматируем дату
     const formatDate = (dateStr: string) => {
       const date = new Date(dateStr)
@@ -6049,56 +6248,75 @@ async function manageMeals(chatId: number, dbUserId: number) {
       const yesterday = new Date()
       yesterday.setDate(yesterday.getDate() - 1)
       const yesterdayStr = yesterday.toISOString().split('T')[0]
-      
-      if (dateStr === today) return '📅 **Сегодня**'
-      if (dateStr === yesterdayStr) return '📅 **Вчера**'
-      return `📅 **${date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}**`
+
+      if (dateStr === today) return '📅 Сегодня'
+      if (dateStr === yesterdayStr) return '📅 Вчера'
+      return `📅 ${date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}`
     }
-    
-    // Отображаем записи по дням
-    let mealIndex = 0
-    Object.keys(logsByDate).sort().reverse().forEach(date => {
-      message += `${formatDate(date)}\n\n`
 
-      logsByDate[date].forEach(log => {
-        mealIndex++
+    // Отображаем записи на текущей странице
+    let currentDate = ''
+    pageLogs.forEach((log, idx) => {
+      const logDate = new Date(log.logged_at).toISOString().split('T')[0]
+      const globalIdx = offset + idx + 1
 
-        // Определяем период дня вместо точного времени
-        const logDate = new Date(log.logged_at)
-        const hour = logDate.getHours()
-        let period = ''
-        if (hour >= 5 && hour < 12) period = '☀️ Утро'
-        else if (hour >= 12 && hour < 17) period = '🌞 День'
-        else if (hour >= 17 && hour < 22) period = '🌆 Вечер'
-        else period = '🌙 Ночь'
+      // Показываем дату если изменилась
+      if (logDate !== currentDate) {
+        if (currentDate !== '') message += `\n` // Разделитель между днями
+        message += `${formatDate(logDate)}\n\n`
+        currentDate = logDate
+      }
 
-        // Показываем полное описание (до 100 символов)
-        const desc = log.description.length > 100
-          ? log.description.substring(0, 100) + '...'
-          : log.description
+      // Определяем период дня
+      const hour = new Date(log.logged_at).getHours()
+      let period = ''
+      if (hour >= 5 && hour < 12) period = '☀️'
+      else if (hour >= 12 && hour < 17) period = '🌞'
+      else if (hour >= 17 && hour < 22) period = '🌆'
+      else period = '🌙'
 
-        message += `**${mealIndex}.** ${period}\n`
-        message += `${desc}\n`
-        message += `🔥 ${log.calories} ккал • Б: ${log.protein}г • Ж: ${log.fats}г • У: ${log.carbs}г\n`
-        message += `━━━━━━━━━━━━━━\n`
+      // Показываем компактное описание (до 60 символов)
+      const desc = log.description.length > 60
+        ? log.description.substring(0, 60) + '...'
+        : log.description
 
-        // Inline кнопки для каждого приема
-        keyboard.inline_keyboard.push([
-          { text: `✏️ #${mealIndex}`, callback_data: `edit_meal_${log.id}` },
-          { text: `🗑 #${mealIndex}`, callback_data: `delete_meal_${log.id}` }
-        ])
+      const timeAgo = getTimeAgo(log.logged_at)
 
-        message += '\n'
-      })
+      message += `**${globalIdx}.** ${period} ${desc}\n`
+      message += `🔥 ${log.calories} ккал • Б:${log.protein}г Ж:${log.fats}г У:${log.carbs}г\n`
+      message += `⏰ ${timeAgo}\n`
+
+      // Inline кнопки для каждого приема
+      keyboard.inline_keyboard.push([
+        { text: `✏️ Изменить #${globalIdx}`, callback_data: `edit_meal_${log.id}` },
+        { text: `🗑 Удалить #${globalIdx}`, callback_data: `delete_meal_${log.id}` }
+      ])
+
+      message += `━━━━━━━━━━━━━━\n`
     })
-    
+
+    // Навигация по страницам (если нужно)
+    if (totalPages > 1) {
+      const navRow = []
+      if (page > 0) {
+        navRow.push({ text: "⬅️ Назад", callback_data: `meals_page_${page - 1}` })
+      }
+      navRow.push({ text: `• ${page + 1}/${totalPages} •`, callback_data: "noop" })
+      if (page < totalPages - 1) {
+        navRow.push({ text: "Вперед ➡️", callback_data: `meals_page_${page + 1}` })
+      }
+      keyboard.inline_keyboard.push(navRow)
+    }
+
     // Навигационные кнопки
     keyboard.inline_keyboard.push(
-      [{ text: "🍽 Добавить прием", callback_data: "quick_log_food" }],
-      [{ text: "📊 Статистика", callback_data: "diary" }],
-      [{ text: "🔙 Назад", callback_data: "cancel_action" }]
+      [{ text: "➕ Добавить прием", callback_data: "quick_log_food" }],
+      [
+        { text: "📊 Дневник", callback_data: "diary" },
+        { text: "🏠 Главное меню", callback_data: "main_menu" }
+      ]
     )
-    
+
     await sendMessage(chatId, message, keyboard)
   } catch (error) {
     console.error('Error managing meals:', error)
@@ -6192,6 +6410,88 @@ async function confirmDeleteMeal(chatId: number, dbUserId: number, mealId: numbe
     await sendMessage(chatId, "❌ Ошибка удаления приема пищи")
   }
 }
+
+// ============================================
+// 🎨 UI/UX HELPER FUNCTIONS
+// ============================================
+
+/**
+ * Функция для цветного прогресс-бара с эмодзи
+ */
+function getColoredProgressBar(current: number, target: number): string {
+  const percent = Math.min(Math.round((current / target) * 100), 100)
+  const filled = Math.floor(percent / 10)
+  const empty = 10 - filled
+
+  // Цветовая индикация через эмодзи
+  let barEmoji = '🟩' // зеленый (норма)
+  if (percent < 50) barEmoji = '🟥' // красный (мало)
+  else if (percent < 80) barEmoji = '🟨' // желтый (маловато)
+  else if (percent > 110) barEmoji = '🟧' // оранжевый (много)
+
+  return barEmoji.repeat(filled) + '⬜'.repeat(empty) + ` ${percent}%`
+}
+
+/**
+ * Функция для расчета "сколько времени назад"
+ */
+function getTimeAgo(timestamp: string): string {
+  const minutes = Math.floor((Date.now() - new Date(timestamp).getTime()) / 60000)
+  if (minutes < 1) return 'только что'
+  if (minutes < 60) return `${minutes} мин назад`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours} ч назад`
+  const days = Math.floor(hours / 24)
+  if (days === 1) return 'вчера'
+  if (days < 7) return `${days} дн назад`
+  return new Date(timestamp).toLocaleDateString('ru-RU')
+}
+
+/**
+ * Генерация AI-powered инсайтов для дневника
+ */
+async function generateDailyInsight(
+  consumed: any,
+  plan: any,
+  todayLogs: any[]
+): Promise<string> {
+  try {
+    const calPercent = Math.round((consumed.calories / plan.calories) * 100)
+    const proteinPercent = Math.round((consumed.protein / plan.protein) * 100)
+
+    const prompt = `Ты - позитивный AI диетолог. Проанализируй данные и дай ОДИН короткий совет (макс 2 предложения).
+
+ПЛАН: ${Math.round(plan.calories)} ккал, Б:${Math.round(plan.protein)}г, Ж:${Math.round(plan.fats)}г, У:${Math.round(plan.carbs)}г
+СЪЕДЕНО: ${Math.round(consumed.calories)} ккал (${calPercent}%), Б:${Math.round(consumed.protein)}г (${proteinPercent}%)
+ПРИЕМОВ: ${todayLogs.length}
+
+Дай короткий мотивирующий совет с 1 эмодзи. БЕЗ приветствий, сразу по делу.`
+
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: 'gpt-5-nano',
+        messages: [{ role: 'user', content: prompt }],
+        max_completion_tokens: 80
+      })
+    })
+
+    if (!response.ok) {
+      return '' // Возвращаем пустую строку если ошибка
+    }
+
+    const data = await response.json()
+    return data.choices[0].message.content.trim()
+  } catch (error) {
+    console.error('Error generating insight:', error)
+    return '' // Тихо возвращаем пустую строку
+  }
+}
+
 /**
  * Показать дневник
  */
@@ -6204,13 +6504,29 @@ async function showDiary(chatId: number, dbUserId: number) {
       .eq('user_id', dbUserId)
       .eq('is_active', true)
       .single()
-    
+
+    // Проверяем наличие плана
+    if (!plan) {
+      await sendMessage(chatId,
+        "⚠️ **План питания не найден**\n\n" +
+        "Сначала нужно создать план КБЖУ.\n\n" +
+        "Используй кнопку **Профиль** → **Изменить план КБЖУ**",
+        {
+          inline_keyboard: [
+            [{ text: "👤 Профиль", callback_data: "profile" }],
+            [{ text: "🏠 Главное меню", callback_data: "main_menu" }]
+          ]
+        }
+      )
+      return
+    }
+
     const { data: profile } = await supabase
       .from('user_profiles')
       .select('*')
       .eq('user_id', dbUserId)
       .single()
-    
+
     // Получаем записи за сегодня
     const today = new Date().toISOString().split('T')[0]
     const { data: todayLogs } = await supabase
@@ -6219,7 +6535,7 @@ async function showDiary(chatId: number, dbUserId: number) {
       .eq('user_id', dbUserId)
       .gte('logged_at', `${today}T00:00:00`)
       .order('logged_at', { ascending: false })
-    
+
     // Считаем съеденное
     const consumed = todayLogs?.reduce((acc, log) => ({
       calories: acc.calories + (log.calories || 0),
@@ -6227,39 +6543,65 @@ async function showDiary(chatId: number, dbUserId: number) {
       fats: acc.fats + (log.fats || 0),
       carbs: acc.carbs + (log.carbs || 0)
     }), { calories: 0, protein: 0, fats: 0, carbs: 0 }) || { calories: 0, protein: 0, fats: 0, carbs: 0 }
-    
-    // Округление до 1 знака после запятой
+
+    // Округление
     const round = (num: number) => Math.round(num * 10) / 10
 
-    let diaryText = `📊 **Дневник за ${new Date().toLocaleDateString('ru-RU')}**
-**План на день:**
-🔥 Калории: ${Math.round(plan.calories)} ккал
-🥩 Белки: ${Math.round(plan.protein)}г
-🥑 Жиры: ${Math.round(plan.fats)}г
-🍞 Углеводы: ${Math.round(plan.carbs)}г
-💧 Вода: ${round(plan.water)}л
-**Съедено:**
-🔥 ${round(consumed.calories)} / ${Math.round(plan.calories)} ккал (${Math.round(consumed.calories / plan.calories * 100)}%)
-🥩 ${round(consumed.protein)}г / ${Math.round(plan.protein)}г
-🥑 ${round(consumed.fats)}г / ${Math.round(plan.fats)}г
-🍞 ${round(consumed.carbs)}г / ${Math.round(plan.carbs)}г
-**Осталось:**
-🔥 ${round(plan.calories - consumed.calories)} ккал
-🥩 ${round(plan.protein - consumed.protein)}г белка
-🥑 ${round(plan.fats - consumed.fats)}г жиров
-🍞 ${round(plan.carbs - consumed.carbs)}г углеводов`
-    // Добавляем список приемов пищи
-    if (todayLogs && todayLogs.length > 0) {
-      diaryText += '\n\n**📝 Приемы пищи:**'
-      todayLogs.forEach((log, index) => {
-        const time = new Date(log.logged_at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
-        const shortDesc = log.description.length > 50 ? log.description.substring(0, 50) + '...' : log.description
-        diaryText += `\n${index + 1}. ${time} - ${shortDesc}`
-        diaryText += `\n   🔥 ${log.calories}ккал | Б:${log.protein}г | Ж:${log.fats}г | У:${log.carbs}г`
-      })
+    // Функция для прогресс-бара
+    const getProgressBar = (current: number, target: number) => {
+      const percent = Math.min(Math.round((current / target) * 100), 100)
+      const filled = Math.floor(percent / 10)
+      const empty = 10 - filled
+      return '▓'.repeat(filled) + '░'.repeat(empty) + ` ${percent}%`
     }
-    
-    // 🔥 ОПТИМИЗИРОВАННАЯ клавиатура с быстрыми действиями
+
+    // Функция для эмодзи-индикатора
+    const getStatusEmoji = (current: number, target: number) => {
+      const percent = (current / target) * 100
+      if (percent >= 90 && percent <= 110) return '✅'
+      if (percent < 70) return '⚠️'
+      if (percent > 130) return '❌'
+      return '📊'
+    }
+
+    // Расчет процентов
+    const calPercent = Math.round((consumed.calories / plan.calories) * 100)
+    const proteinPercent = Math.round((consumed.protein / plan.protein) * 100)
+    const fatsPercent = Math.round((consumed.fats / plan.fats) * 100)
+    const carbsPercent = Math.round((consumed.carbs / plan.carbs) * 100)
+
+    let diaryText = `📊 **Сегодня** • ${new Date().toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}
+
+🔥 **Калории:** ${round(consumed.calories).toLocaleString('ru')} / ${Math.round(plan.calories).toLocaleString('ru')} ккал
+${getColoredProgressBar(consumed.calories, plan.calories)}
+
+🥩 **Белки:** ${round(consumed.protein)}г / ${Math.round(plan.protein)}г ${getStatusEmoji(consumed.protein, plan.protein)}
+🥑 **Жиры:** ${round(consumed.fats)}г / ${Math.round(plan.fats)}г ${getStatusEmoji(consumed.fats, plan.fats)}
+🍞 **Углеводы:** ${round(consumed.carbs)}г / ${Math.round(plan.carbs)}г ${getStatusEmoji(consumed.carbs, plan.carbs)}`
+
+    // Добавляем информацию о приемах пищи
+    if (todayLogs && todayLogs.length > 0) {
+      diaryText += `\n\n🍽️ **Приемов:** ${todayLogs.length}`
+
+      const lastLog = todayLogs[0]
+      const shortDesc = lastLog.description.length > 50 ? lastLog.description.substring(0, 50) + '...' : lastLog.description
+      const timeAgo = getTimeAgo(lastLog.logged_at)
+
+      diaryText += `\n**Последний:** ${shortDesc}\n💡 ${lastLog.calories} ккал • ${timeAgo}`
+    }
+
+    // 🤖 Генерируем AI инсайт (только если есть данные)
+    if (todayLogs && todayLogs.length > 0 && consumed.calories > 0) {
+      const insight = await generateDailyInsight(consumed, plan, todayLogs)
+      if (insight) {
+        diaryText += `\n\n💡 **Совет:** ${insight}`
+      }
+    }
+
+    // Добавляем подсказку
+    diaryText += `\n\n💬 **Просто напиши в чат:**\n"съел банан 150г" или "что на ужин?"`
+
+    // 🔥 УЛУЧШЕННАЯ клавиатура
     await sendMessage(chatId, diaryText, myDayActionsKeyboard())
   } catch (error) {
     console.error('Error showing diary:', error)
@@ -6561,9 +6903,11 @@ async function handleUpdate(update: TelegramUpdate) {
       // Обработка команд
       if (message.text?.startsWith('/')) {
         const command = message.text.split(' ')[0].substring(1)
-        
+
         if (command === 'start') {
           await handleStartCommand(message)
+        } else if (command === 'help') {
+          await handleHelpCommand(message.chat.id)
         }
       } else if (message.photo) {
         // Обработка фото
