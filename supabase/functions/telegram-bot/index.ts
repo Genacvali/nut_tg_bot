@@ -1410,9 +1410,6 @@ ${recommendations}
     keyboard: [
       [
         {
-          text: "💎 Подписка"
-        },
-        {
           text: "👤 Профиль"
         }
       ],
@@ -1552,12 +1549,6 @@ ${recommendations}
         {
           text: "📈 Прогресс",
           callback_data: "progress_menu"
-        }
-      ],
-      [
-        {
-          text: "💎 Подписка",
-          callback_data: "show_subscription"
         }
       ],
       [
@@ -1817,41 +1808,7 @@ ${recommendations}
   const userId = callbackQuery.from.id;
   // Получаем пользователя из БД
   const user = await getOrCreateUser(callbackQuery.from.id, callbackQuery.from.username, callbackQuery.from.first_name);
-  // БЛОКИРОВКА: Проверяем подписку (кроме действий связанных с оплатой и регистрацией)
-  const allowedActions = [
-    'fill_profile',
-    'buy_subscription',
-    'show_profile',
-    'gender_',
-    'activity_',
-    'goal_'
-  ];
-  const isAllowed = allowedActions.some((action)=>data.startsWith(action)) || data.startsWith('select_plan_');
-  if (!isAllowed) {
-    const subscriptionData = await getSubscriptionInfo(user.id);
-    const subscriptionInfo = Array.isArray(subscriptionData) ? subscriptionData[0] : subscriptionData;
-    // Если подписка истекла и это не unlimited
-    if (subscriptionInfo && subscriptionInfo.needs_payment && !subscriptionInfo.is_unlimited) {
-      const blockMessage = `⏰ **Пробный период истек**\n\n` + `😔 К сожалению, твой 7-дневный пробный период подошел к концу.\n\n` + `💎 **Продолжи пользоваться C.I.D.** — выбери подходящий тариф:\n\n` + `⚡ **1 месяц** — 129₽ (Попробовать)\n` + `🔥 **6 месяцев** — 649₽ (Популярный)\n` + `💎 **1 год** — 1099₽ (Выгодно!)\n\n` + `🔒 Безопасная оплата через T-Bank\n` + `✨ Подписка активируется моментально`;
-      await sendMessage(chatId, blockMessage, {
-        inline_keyboard: [
-          [
-            {
-              text: "💳 Оформить подписку",
-              callback_data: "buy_subscription"
-            }
-          ],
-          [
-            {
-              text: "👤 Мой профиль",
-              callback_data: "show_profile"
-            }
-          ]
-        ]
-      });
-      return; // Блокируем дальнейшую обработку
-    }
-  }
+  // Подписочная система отключена - все функции доступны бесплатно
   // Начало заполнения профиля
   if (data === 'fill_profile') {
     await setUserState(userId, 'waiting_name', {});
@@ -1918,26 +1875,8 @@ ${recommendations}
 "Путь в тысячу миль начинается с первого шага!"
 💡 Все параметры рассчитаны с помощью ИИ и максимально приближены к реальности, но помни — это ориентиры для старта. Слушай своё тело и корректируй план по мере необходимости.`;
     await sendMessage(chatId, welcomeText);
-    // Показываем информацию о trial подписке
-    const subscriptionData = await getSubscriptionInfo(user.id);
-    const subscriptionInfo = Array.isArray(subscriptionData) ? subscriptionData[0] : subscriptionData;
-    if (subscriptionInfo && subscriptionInfo.is_trial) {
-      const daysLeft = Math.ceil((new Date(subscriptionInfo.expires_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
-      const trialMessage = `🎁 **Пробный период активирован!**\n\n` + `⏰ **${daysLeft} ${daysLeft === 1 ? 'день' : daysLeft < 5 ? 'дня' : 'дней'}** бесплатного доступа\n\n` + `💡 **Сейчас ничего платить не нужно!**\n` + `Никаких данных карт, никаких автоплатежей.\n\n` + `✨ Пользуйся **всеми функциями** бота совершенно бесплатно.\n\n` + `📅 После ${daysLeft} ${daysLeft === 1 ? 'дня' : daysLeft < 5 ? 'дней' : 'дней'} сможешь продолжить за:\n` + `• 1 месяц — 129₽\n` + `• 6 месяцев — 649₽ (выгодно!)\n` + `• 1 год — 1099₽ (супер выгодно!)\n\n` + `🚀 Начинай прямо сейчас!`;
-      await sendMessage(chatId, trialMessage, {
-        inline_keyboard: [
-          [
-            {
-              text: "🚀 Начать пользоваться",
-              callback_data: "start_onboarding"
-            }
-          ]
-        ]
-      });
-    } else {
-      // Если подписка не trial (например, админ дал unlimited) - просто показываем меню
-      await sendMessage(chatId, "🏠 **Главное меню**", getMainKeyboard());
-    }
+    // Показываем главное меню после создания плана
+    await sendMessage(chatId, "🏠 **Главное меню**", getMainKeyboard());
   } else if (data === 'edit_profile') {
     await sendMessage(chatId, "✏️ Что хочешь изменить?", {
       inline_keyboard: [
@@ -2074,7 +2013,17 @@ ${recommendations}
   } else if (data === 'diary') {
     await showDiary(chatId, user.id);
   } else if (data === 'start_onboarding') {
-    await startOnboarding(chatId, userId);
+    // Проверяем, есть ли у пользователя профиль и план
+    const { data: profile } = await supabase.from('user_profiles').select('*').eq('user_id', user.id).single();
+    const { data: plan } = await supabase.from('nutrition_plans').select('*').eq('user_id', user.id).eq('is_active', true).single();
+    
+    // Если профиль и план уже есть - показываем финальное сообщение с советами
+    if (profile && plan) {
+      await onboardingStep6(chatId, userId);
+    } else {
+      // Если профиля/плана нет - начинаем полный онбординг
+      await startOnboarding(chatId, userId);
+    }
   } else if (data === 'onboarding_step_2') {
     await onboardingStep2(chatId, userId);
   } else if (data === 'onboarding_step_3') {
@@ -2162,128 +2111,6 @@ ${recommendations}
         ]
       ]
     });
-  } else if (data === 'buy_subscription') {
-    // Получаем только платные планы (monthly, quarterly, yearly)
-    const { data: plans } = await supabase.from('subscription_plans').select('*').in('name', [
-      'monthly',
-      'quarterly',
-      'yearly'
-    ]).order('duration_days', {
-      ascending: true
-    });
-    if (!plans || plans.length === 0) {
-      await sendMessage(chatId, "❌ Планы подписки недоступны. Обратитесь к администратору.");
-      return;
-    }
-    let message = `💎 **Оформление подписки C.I.D.**\n\n`;
-    message += `Выбери подходящий тариф:\n\n`;
-    const keyboard = [];
-    // Emoji для каждого плана
-    const planEmoji = {
-      'monthly': '⚡',
-      'quarterly': '🔥',
-      'yearly': '💎'
-    };
-    for (const plan of plans){
-      const priceRub = plan.price_rub || 0;
-      const emoji = planEmoji[plan.name] || '✨';
-      let durationText = '';
-      let description = '';
-      if (plan.name === 'monthly') {
-        durationText = '1 месяц';
-        description = 'Попробовать';
-      } else if (plan.name === 'quarterly') {
-        durationText = '6 месяцев';
-        description = 'Популярный';
-      } else if (plan.name === 'yearly') {
-        durationText = '1 год';
-        description = 'Выгодно!';
-      }
-      message += `${emoji} **${durationText}** — ${priceRub}₽ (${description})\n`;
-      keyboard.push([
-        {
-          text: `${emoji} ${durationText} — ${priceRub}₽`,
-          callback_data: `select_plan_${plan.id}`
-        }
-      ]);
-    }
-    message += `\n🔒 **Безопасная оплата через T-Bank**\n`;
-    message += `✨ Подписка активируется моментально после оплаты`;
-    keyboard.push([
-      {
-        text: "🔙 Назад",
-        callback_data: "show_profile"
-      }
-    ]);
-    await sendMessage(chatId, message, {
-      inline_keyboard: keyboard
-    });
-  } else if (data.startsWith('select_plan_')) {
-    const planId = parseInt(data.split('_')[2]);
-    // Получаем информацию о плане
-    const { data: plan } = await supabase.from('subscription_plans').select('*').eq('id', planId).single();
-    if (!plan) {
-      await sendMessage(chatId, "❌ План не найден");
-      return;
-    }
-    const priceRub = plan.price_rub || plan.price_usd * 95;
-    const durationText = plan.duration_days === 30 ? '1 месяц' : plan.duration_days === 90 ? '3 месяца' : plan.duration_days === 365 ? '1 год' : `${plan.duration_days} дней`;
-    await sendMessage(chatId, `⏳ Создаю платеж...\n\n📦 План: ${durationText}\n💰 Сумма: ${priceRub}₽`);
-    try {
-      // Вызываем Edge Function для создания платежа
-      const supabaseUrl = Deno.env.get('SUPABASE_URL');
-      const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-      const paymentResponse = await fetch(`${supabaseUrl}/functions/v1/tbank-payment`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${serviceKey}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          userId: user.id,
-          planId: planId
-        })
-      });
-      const paymentData = await paymentResponse.json();
-      if (!paymentData.success) {
-        throw new Error(paymentData.error || 'Ошибка создания платежа');
-      }
-      // Отправляем ссылку на оплату
-      await sendMessage(chatId, `✅ **Готово к оплате!**\n\n` + `📦 План: ${durationText}\n` + `💰 Сумма: ${priceRub}₽\n\n` + `🔒 Безопасная оплата через T-Bank\n` + `После оплаты подписка активируется автоматически.`, {
-        inline_keyboard: [
-          [
-            {
-              text: "💳 Оплатить",
-              url: paymentData.payment_url
-            }
-          ],
-          [
-            {
-              text: "❌ Отмена",
-              callback_data: "buy_subscription"
-            }
-          ]
-        ]
-      });
-    } catch (error) {
-      console.error('Payment creation error:', error);
-      await sendMessage(chatId, `❌ **Ошибка создания платежа**\n\n${error.message}\n\nПопробуй еще раз или обратись к администратору.`, {
-        inline_keyboard: [
-          [
-            {
-              text: "🔄 Попробовать снова",
-              callback_data: "buy_subscription"
-            }
-          ],
-          [
-            {
-              text: "🏠 Главное меню",
-              callback_data: "main_menu"
-            }
-          ]
-        ]
-      });
-    }
   } else if (data === 'show_profile') {
     await showProfileMenu(chatId, user.id);
   } else if (data === 'quick_log') {
@@ -2372,6 +2199,55 @@ ${recommendations}
   } else if (data === 'clear_chat_history') {
     await clearChatHistory(user.id);
     await sendMessage(chatId, "✅ История диалога очищена.\n\nНачнем с чистого листа! 🎯", getMainKeyboard());
+  } else if (data === 'confirm_reset_account') {
+    await sendMessage(chatId, `⚠️ **Подтверждение удаления всех данных**\n\n` + `Это действие удалит:\n` + `• Все записи о приемах пищи\n` + `• Все записи о воде\n` + `• План КБЖУ\n` + `• Историю веса\n` + `• Шаблоны блюд\n` + `• Предпочтения\n` + `• Историю диалога\n` + `• Настройки уведомлений\n\n` + `⚠️ **Это действие нельзя отменить!**\n\n` + `После удаления ты сможешь начать заново через /start`, {
+      inline_keyboard: [
+        [
+          {
+            text: "✅ Да, удалить все",
+            callback_data: "reset_account"
+          },
+          {
+            text: "❌ Отмена",
+            callback_data: "show_profile"
+          }
+        ]
+      ]
+    });
+  } else if (data === 'reset_account') {
+    await sendMessage(chatId, "⏳ Удаляю все данные...");
+    try {
+      // Удаляем все данные пользователя
+      await supabase.from('food_logs').delete().eq('user_id', user.id);
+      await supabase.from('water_logs').delete().eq('user_id', user.id);
+      await supabase.from('nutrition_plans').delete().eq('user_id', user.id);
+      await supabase.from('weight_logs').delete().eq('user_id', user.id);
+      await supabase.from('meal_templates').delete().eq('user_id', user.id);
+      await supabase.from('user_preferences').delete().eq('user_id', user.id);
+      await supabase.from('user_states').delete().eq('telegram_id', userId);
+      await supabase.from('meal_plans').delete().eq('user_id', user.id);
+      await supabase.from('notification_settings').delete().eq('user_id', user.id);
+      
+      // Очищаем историю диалога
+      await clearChatHistory(user.id);
+      
+      // ВАЖНО: Полностью удаляем профиль, чтобы при /start запустилась полная регистрация
+      await supabase.from('user_profiles').delete().eq('user_id', user.id);
+      
+      await sendMessage(chatId, `✅ **Все данные удалены!**\n\n` + `Твой аккаунт полностью сброшен.\n\n` + `Используй кнопку ниже для начала регистрации заново.`, {
+        inline_keyboard: [
+          [
+            {
+              text: "🚀 Начать регистрацию",
+              callback_data: "fill_profile"
+            }
+          ]
+        ]
+      });
+    } catch (error) {
+      console.error('Error resetting account:', error);
+      await sendMessage(chatId, "❌ Ошибка при удалении данных. Попробуй еще раз или обратись к администратору.");
+    }
   } else if (data === 'manage_meals') {
     await manageMeals(chatId, user.id);
   } else if (data.startsWith('delete_meal_')) {
@@ -2433,6 +2309,10 @@ ${recommendations}
     });
   } else if (data.startsWith('edit_meal_')) {
     const mealId = parseInt(data.split('_')[2]);
+    if (isNaN(mealId)) {
+      await sendMessage(chatId, "❌ Ошибка: неверный ID приема пищи.");
+      return;
+    }
     // Получаем информацию о приеме
     const { data: meal } = await supabase.from('food_logs').select('*').eq('id', mealId).eq('user_id', user.id).single();
     if (meal) {
@@ -2913,8 +2793,6 @@ ${recommendations}
     await showUserPreferencesMenu(chatId, user.id);
   } else if (data === 'help_menu') {
     await showHelpMenu(chatId, user.id);
-  } else if (data === 'show_subscription') {
-    await showSubscriptionMenu(chatId, user.id);
   } else if (data === 'my_templates') {
     // Показываем сохраненные шаблоны приемов пищи
     const { data: templates, error } = await supabase.from('user_meal_templates').select('*').eq('user_id', user.id).order('created_at', {
@@ -2990,7 +2868,7 @@ ${recommendations}
       inline_keyboard: keyboard
     });
   } else if (data === 'settings_menu') {
-    await sendMessage(chatId, `⚙️ **Настройки**\n\n` + `Управление профилем, целями и подпиской:`, settingsMenuKeyboard());
+    await sendMessage(chatId, `⚙️ **Настройки**\n\n` + `Управление профилем и целями:`, settingsMenuKeyboard());
   } else if (data === 'save_ai_recipe') {
     // Сохраняем последний рецепт от AI
     await sendMessage(chatId, `💾 **Сохранение рецепта**\n\n` + `Введи название для этого рецепта:\n\n` + `Например: "Овсянка с бананом" или "Курица в духовке"`, {
@@ -3086,32 +2964,7 @@ ${recommendations}
   const stateData = await getUserState(userId);
   console.log('handleTextMessage - userId:', userId, 'text:', message.text, 'state:', stateData?.state);
   const user = await getOrCreateUser(message.from.id, message.from.username, message.from.first_name);
-  // БЛОКИРОВКА: Проверяем подписку (кроме команды /start)
-  if (message.text !== '/start') {
-    const subscriptionData = await getSubscriptionInfo(user.id);
-    const subscriptionInfo = Array.isArray(subscriptionData) ? subscriptionData[0] : subscriptionData;
-    // Если подписка истекла и это не unlimited
-    if (subscriptionInfo && subscriptionInfo.needs_payment && !subscriptionInfo.is_unlimited) {
-      const blockMessage = `⏰ **Пробный период истек**\n\n` + `😔 К сожалению, твой 7-дневный пробный период подошел к концу.\n\n` + `💎 **Продолжи пользоваться C.I.D.** — выбери подходящий тариф:\n\n` + `⚡ **1 месяц** — 129₽ (Попробовать)\n` + `🔥 **6 месяцев** — 649₽ (Популярный)\n` + `💎 **1 год** — 1099₽ (Выгодно!)\n\n` + `🔒 Безопасная оплата через T-Bank\n` + `✨ Подписка активируется моментально`;
-      await sendMessage(message.chat.id, blockMessage, {
-        inline_keyboard: [
-          [
-            {
-              text: "💳 Оформить подписку",
-              callback_data: "buy_subscription"
-            }
-          ],
-          [
-            {
-              text: "👤 Мой профиль",
-              callback_data: "show_profile"
-            }
-          ]
-        ]
-      });
-      return; // Блокируем дальнейшую обработку
-    }
-  }
+  // Подписочная система отключена - все функции доступны бесплатно
   // Сначала проверяем навигационные кнопки (они работают без состояния)
   const navigationButtons = [
     // Новые кнопки главного меню (3 кнопки)
@@ -3340,6 +3193,11 @@ ${recommendations}
     await handleRecipeRequest(userId, message.chat.id, user.id, message.text, message.message_id);
   } else if (stateData.state === 'editing_meal') {
     if (!message.text) return;
+    if (!stateData.data || !stateData.data.mealId) {
+      await sendMessage(message.chat.id, "❌ Ошибка: ID приема пищи не найден. Попробуй начать редактирование заново.");
+      await clearUserState(userId);
+      return;
+    }
     await handleMealEdit(userId, message.chat.id, user.id, stateData.data.mealId, message.text);
   } else if (stateData.state.startsWith('editing_')) {
     if (!message.text) return;
@@ -3754,11 +3612,11 @@ ${recommendations}
       break;
     // 🔥 Кнопка: Профиль
     case '👤 Профиль':
-      await sendMessage(chatId, `👤 **Профиль**\n\n` + `Управление профилем, целями и подпиской:`, settingsMenuKeyboard());
+      await sendMessage(chatId, `👤 **Профиль**\n\n` + `Управление профилем и целями:`, settingsMenuKeyboard());
       break;
     // 🔥 Кнопка: Помощь (мануал)
     case '❓ Помощь':
-      await sendMessage(chatId, `❓ **Помощь**\n\n` + `**Умный чат:**\n` + `Просто пиши в чат - я сам пойму что делать!\n` + `• "съел овсянку 60г, банан" → запишу прием\n` + `• "выпил 500мл воды" → запишу воду\n` + `• "что на ужин?" → дам рецепт\n` + `• "я не ем рыбу" → запомню предпочтения\n\n` + `**Кнопки:**\n` + `📊 **Дневник** - КБЖУ, вода, приемы пищи\n` + `📖 **Рецепты** - сохраненные шаблоны и рецепты\n` + `👤 **Профиль** - настройки, цели, подписка\n` + `❓ **Помощь** - инструкция по использованию бота\n\n` + `**Сохранение рецептов:**\n` + `Когда я предлагаю рецепт, под сообщением появятся кнопки:\n` + `• 📖 Сохранить рецепт\n` + `• 🍽 Записать как прием\n` + `• 💾 Сохранить по отдельности (для рационов)\n\n` + `**Подсказка:** Я запоминаю контекст разговора, как ChatGPT!`, {
+      await sendMessage(chatId, `❓ **Помощь**\n\n` + `**Умный чат:**\n` + `Просто пиши в чат - я сам пойму что делать!\n` + `• "съел овсянку 60г, банан" → запишу прием\n` + `• "выпил 500мл воды" → запишу воду\n` + `• "что на ужин?" → дам рецепт\n` + `• "я не ем рыбу" → запомню предпочтения\n\n` + `**Кнопки:**\n` + `📊 **Дневник** - КБЖУ, вода, приемы пищи\n` + `📖 **Рецепты** - сохраненные шаблоны и рецепты\n` + `👤 **Профиль** - настройки и цели\n` + `❓ **Помощь** - инструкция по использованию бота\n\n` + `**Сохранение рецептов:**\n` + `Когда я предлагаю рецепт, под сообщением появятся кнопки:\n` + `• 📖 Сохранить рецепт\n` + `• 🍽 Записать как прием\n` + `• 💾 Сохранить по отдельности (для рационов)\n\n` + `**Подсказка:** Я запоминаю контекст разговора, как ChatGPT!`, {
         inline_keyboard: [
           [
             {
@@ -3785,9 +3643,6 @@ ${recommendations}
     case '👤 Профиль':
       await showProfileMenu(chatId, user.id);
       break;
-    case '💎 Подписка':
-      await showSubscriptionMenu(chatId, user.id);
-      break;
     case '🎯 Мои предпочтения':
       await showUserPreferencesMenu(chatId, user.id);
       break;
@@ -3802,6 +3657,13 @@ ${recommendations}
  * Обработка редактирования приема пищи
  */ async function handleMealEdit(userId, chatId, dbUserId, mealId, newDescription) {
   try {
+    // Проверяем валидность mealId
+    if (!mealId || isNaN(mealId) || mealId <= 0) {
+      console.error('Invalid mealId in handleMealEdit:', mealId);
+      await sendMessage(chatId, "❌ Ошибка: неверный ID приема пищи. Попробуй начать редактирование заново.");
+      await clearUserState(userId);
+      return;
+    }
     await sendMessage(chatId, "⏳ Анализирую новое описание...");
     // Получаем план питания
     const { data: plan } = await supabase.from('nutrition_plans').select('*').eq('user_id', dbUserId).eq('is_active', true).single();
@@ -5252,30 +5114,6 @@ ${subscriptionText}
     } catch (error) {
       console.error('Error getting streak stats:', error);
     }
-    // Получаем информацию о подписке
-    const subscriptionData = await getSubscriptionInfo(dbUserId);
-    const subscriptionInfo = Array.isArray(subscriptionData) ? subscriptionData[0] : subscriptionData;
-    console.log('Subscription info:', JSON.stringify(subscriptionInfo));
-    if (subscriptionInfo) {
-      profileText += `📦 **Подписка:**\n`;
-      if (subscriptionInfo.is_unlimited) {
-        profileText += `✨ **Безлимитная** (подарок от админа)\n\n`;
-      } else if (subscriptionInfo.is_trial && !subscriptionInfo.needs_payment) {
-        const daysLeft = Math.ceil((new Date(subscriptionInfo.expires_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
-        profileText += `🎁 **Пробный период:** ${daysLeft} ${daysLeft === 1 ? 'день' : daysLeft < 5 ? 'дня' : 'дней'} осталось\n`;
-        profileText += `\n💡 Сейчас ничего вводить не нужно. После истечения пробного периода появится кнопка оплаты.\n\n`;
-      } else if (subscriptionInfo.needs_payment) {
-        profileText += `🔒 **Истекла**\n\n`;
-        profileText += `💳 Оформи подписку для продолжения:\n`;
-        profileText += `📦 1 месяц - 129₽\n`;
-        profileText += `📦 6 месяцев - 649₽\n`;
-        profileText += `📦 1 год - 1099₽\n\n`;
-      } else {
-        const daysLeft = Math.ceil((new Date(subscriptionInfo.expires_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
-        profileText += `✅ **Активна:** ${subscriptionInfo.plan_name}\n`;
-        profileText += `⏰ **Осталось:** ${daysLeft} ${daysLeft === 1 ? 'день' : daysLeft < 5 ? 'дня' : 'дней'}\n\n`;
-      }
-    }
     profileText += `💡 Здесь ты можешь отредактировать свои параметры или изменить план КБЖУ`;
     const keyboard = [
       [
@@ -5301,15 +5139,12 @@ ${subscriptionText}
         }
       ]
     ];
-    // Показываем кнопку покупки только если подписка истекла
-    if (subscriptionInfo && subscriptionInfo.needs_payment) {
-      keyboard.unshift([
-        {
-          text: "💳 Купить подписку",
-          callback_data: "buy_subscription"
-        }
-      ]);
-    }
+    keyboard.push([
+      {
+        text: "🗑 Удалить все данные и начать заново",
+        callback_data: "confirm_reset_account"
+      }
+    ]);
     keyboard.push([
       {
         text: "🏠 Главное меню",
