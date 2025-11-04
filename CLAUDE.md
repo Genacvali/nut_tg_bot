@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 C.I.D. is an AI-powered nutrition Telegram bot written in TypeScript for Deno. The bot helps users track calories, get personalized meal plans, and achieve health goals using OpenAI integration. It runs on Supabase Edge Functions with T-Bank payment integration.
 
+**Tech Stack**: TypeScript (Deno runtime), Supabase (Edge Functions + PostgreSQL), OpenAI API (GPT-4o-mini), Telegram Bot API, T-Bank payment gateway
+
 ## Development Commands
 
 ### Setup
@@ -46,6 +48,9 @@ supabase functions deploy telegram-bot --no-verify-jwt
 # View logs
 supabase functions logs telegram-bot
 supabase functions logs tbank-webhook
+
+# View real-time logs (streaming)
+supabase functions logs telegram-bot --follow
 ```
 
 ### Webhook Setup
@@ -133,11 +138,23 @@ The system analyzes last 5 messages for context to improve classification accura
 
 **Important**: T-Bank webhook signature uses SHA-256 with simple params only (no nested objects). Both `tbank-payment` and `tbank-webhook` have matching `generateToken()` implementations.
 
+### Streak System (Gamification)
+
+The bot includes a Duolingo-style streak system for user engagement:
+
+- `update_user_streak(user_id)` - Automatically called after food logging to update streak
+- `get_user_streak_stats(user_id)` - Get user's streak statistics
+- **Achievement badges**: Bronze (3 days), Silver (7 days), Gold (14 days), Diamond (30 days), Legend (100 days)
+- Users see streak updates immediately after logging food
+- Profile displays current streak, longest streak, and total logs
+
+**Important**: Streak logic resets if user misses a day (> 24 hours since last log).
+
 ### Database Architecture
 
 Key tables (referenced via RPC functions from bot logic):
 
-- `users` - Telegram user data
+- `users` - Telegram user data (includes `current_streak`, `longest_streak`, `last_log_date`, `total_logs_count`)
 - `user_profiles` - Height, weight, goals, activity level
 - `user_subscriptions` - Subscription status/expiry
 - `subscription_plans` - Available plans (trial/monthly/quarterly/yearly/unlimited)
@@ -145,6 +162,7 @@ Key tables (referenced via RPC functions from bot logic):
 - `food_logs` - User food intake records
 - `nutrition_plans` - Calculated KBJU targets
 - `conversation_history` - Message context for AI
+- `user_achievements` - Gamification badges and achievements
 
 **Admin functions** (SQL only, no bot access):
 - `admin_subscriptions_view` - View all subscriptions
@@ -186,13 +204,63 @@ Set these in respective bot settings:
 
 ## Development Workflow
 
+### For Code Changes
 1. **Make changes** in `supabase/functions/`
-2. **Test locally** with `supabase functions serve` (optional)
-3. **Deploy function** with `supabase functions deploy <function-name> --no-verify-jwt`
-4. **Check logs** with `supabase functions logs <function-name>`
-5. **Test via Telegram** - send messages to bot
+2. **Test on dev-bot first** - Deploy to `dev-bot` function to test UI/UX changes safely
+3. **Deploy to production** - `supabase functions deploy telegram-bot --no-verify-jwt`
+4. **Check logs** - `supabase functions logs telegram-bot --follow`
+5. **Test via Telegram** - Send messages to bot and verify behavior
+
+### For Database Changes
+1. **Create migration** in `supabase/migration/*.sql`
+2. **Test locally** - `supabase db reset` (applies all migrations)
+3. **Apply to production** - Copy SQL to Supabase Dashboard SQL Editor and run
+4. **Verify** - Check tables/functions exist via SQL queries
 
 **Important**: Always deploy with `--no-verify-jwt` flag for webhook endpoints to work correctly.
+
+## Testing Strategy
+
+### Manual Testing via dev-bot
+- Use `dev-bot` for all UI/UX changes before deploying to production
+- Test conversation flows, button interactions, and AI responses
+- Verify webhook receives updates correctly
+
+### Testing Food Logging
+```
+# Test simple food log
+"Гречка с курицей 200г"
+
+# Test complex food log
+"Завтрак: овсянка 50г, банан, чай с медом"
+
+# Test voice message
+Send voice message describing food eaten
+```
+
+### Testing Subscriptions
+```sql
+-- Create trial subscription
+SELECT * FROM check_subscription_status(user_id);
+
+-- Extend subscription (admin)
+SELECT admin_extend_subscription(user_id, 30);
+
+-- Check payment status
+SELECT * FROM payment_intents WHERE user_id = X;
+```
+
+### Testing Streak System
+```sql
+-- View user streak stats
+SELECT * FROM get_user_streak_stats(user_id);
+
+-- Check achievements
+SELECT * FROM user_achievements WHERE user_id = X;
+
+-- View leaderboard
+SELECT * FROM streak_leaderboard LIMIT 10;
+```
 
 ## Common Patterns
 
@@ -274,13 +342,55 @@ const { data: status } = await supabase.rpc('check_subscription_status', {
 })
 ```
 
+## Working with Deno
+
+### Import Patterns
+```typescript
+// Deno standard library (always use specific version)
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
+
+// NPM packages via esm.sh (specify version)
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.3'
+
+// Local imports (relative paths)
+import { analyzeFood } from '../_shared/openai.ts'
+```
+
+### Environment Variables
+All functions access env vars via `Deno.env.get()`:
+```typescript
+const TELEGRAM_BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN')
+const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY')
+```
+
+Set via: `supabase secrets set KEY=value`
+
+### HTTP Server Pattern
+Every Supabase Edge Function uses this pattern:
+```typescript
+serve(async (req) => {
+  try {
+    // Handle request
+    const update = await req.json()
+
+    // Process logic
+
+    return new Response('OK', { status: 200 })
+  } catch (error) {
+    console.error('Error:', error)
+    return new Response('Error', { status: 500 })
+  }
+})
+```
+
 ## Debugging Tips
 
-- **Logs are your friend**: Use `supabase functions logs <function-name>` extensively
+- **Logs are your friend**: Use `supabase functions logs <function-name> --follow` extensively
 - **Console.log freely**: All console output appears in function logs
 - **Test webhooks locally**: Use ngrok or similar for local webhook testing
 - **Check T-Bank dashboard**: Verify payment webhooks are being sent
 - **Database access**: Use Supabase Dashboard SQL editor for direct queries
+- **RPC debugging**: Use `console.log` inside PostgreSQL functions via `RAISE NOTICE`
 
 ## Key Design Decisions
 
@@ -290,3 +400,100 @@ const { data: status } = await supabase.rpc('check_subscription_status', {
 4. **Trial-first model** - All new users get 7-day trial before payment
 5. **Shared utilities** - Common functions in `_shared/` to reduce duplication
 6. **RPC-based data access** - Most database operations use stored procedures for consistency
+7. **Deno runtime** - All functions use Deno's stdlib imports (e.g., `https://deno.land/std@0.168.0/...`)
+8. **ESM imports** - Use esm.sh for npm packages (e.g., `https://esm.sh/@supabase/supabase-js@2.39.3`)
+
+## Architecture Patterns
+
+### Two-Bot Setup
+- **telegram-bot** (production) - Uses `TELEGRAM_BOT_TOKEN`
+- **dev-bot** (testing) - Uses `TELEGRAM_BOT_TOKEN_DEV`
+- Both share database and codebase, allowing safe UI/UX testing before production deploy
+
+### ConversationManager Pattern
+All bot functions use the `ConversationManager` class for stateful conversations:
+```typescript
+class ConversationManager {
+  static async getRecentMessages(userId, limit)
+  static async addMessage(userId, role, content, intent, confidence, metadata)
+  static async getCurrentTopic(userId)
+  static async clearContext(userId)
+  static async checkAndClearIfStale(userId) // Auto-clear after 30min
+}
+```
+
+This class wraps RPC calls to `conversation_history` table and manages message context for AI responses.
+
+### Food Logging Flow
+1. User sends text/voice/photo → `telegram-bot`
+2. Intent detection classifies message (food/water/question/navigation)
+3. If `food`: OpenAI analyzes description → extracts KBJU → stores in `food_logs`
+4. Streak system automatically triggered via `update_user_streak(user_id)`
+5. Bot responds with nutrition breakdown + streak update + achievements
+
+### Payment Webhook Flow
+1. `tbank-payment` creates payment intent with `NotificationURL` pointing to `tbank-webhook`
+2. T-Bank processes payment → POST to `tbank-webhook` with signature
+3. `tbank-webhook` verifies SHA-256 signature using `generateToken()`
+4. Updates `user_subscriptions` and `payment_intents` tables
+5. Sends Telegram notification to user
+6. `send-thank-you-messages` function sends follow-up message
+
+## Common Gotchas
+
+### 1. Webhook Not Working
+**Problem**: Bot doesn't respond to messages
+**Solution**:
+```bash
+# Check webhook status
+curl "https://api.telegram.org/bot<TOKEN>/getWebhookInfo"
+
+# Delete and reset webhook
+supabase functions deploy set-webhook --no-verify-jwt
+curl -X POST https://your-project.supabase.co/functions/v1/set-webhook
+```
+
+### 2. Intent Detection Failures
+**Problem**: Bot misclassifies user intent (e.g., food as question)
+**Solution**: Check conversation history - intent detection uses last 5 messages for context. Clear stale context if > 30 minutes old.
+
+### 3. Streak Not Updating
+**Problem**: User logs food but streak doesn't increment
+**Solution**: Verify `update_user_streak` RPC exists and is called after `food_logs` insert. Check function logs for RPC errors.
+
+### 4. Duplicate Payment Notifications
+**Problem**: User receives multiple payment success messages
+**Solution**: Check `tbank-webhook` deduplication logic - should check `payment_intents` status before processing.
+
+### 5. OpenAI Rate Limits
+**Problem**: Bot stops responding due to OpenAI API limits
+**Solution**:
+- Check OpenAI dashboard for rate limit status
+- Consider implementing request queuing
+- Use GPT-4o-mini (cheaper/faster) for intent detection, GPT-4 for complex tasks
+
+## Quick Reference
+
+### Most Common Commands
+```bash
+# Deploy and view logs
+supabase functions deploy telegram-bot --no-verify-jwt && supabase functions logs telegram-bot --follow
+
+# Check subscription status
+SELECT * FROM check_subscription_status(user_id);
+
+# Get user by telegram username
+SELECT * FROM search_user('username');
+
+# View recent food logs
+SELECT * FROM food_logs WHERE user_id = X ORDER BY created_at DESC LIMIT 10;
+```
+
+### Key File Locations
+- Bot logic: `supabase/functions/telegram-bot/index.ts`
+- Dev bot: `supabase/functions/dev-bot/index.ts`
+- OpenAI utils: `supabase/functions/_shared/openai.ts`
+- Subscription logic: `supabase/functions/_shared/subscription.ts`
+- Calculators: `supabase/functions/_shared/calculators.ts`
+- Migrations: `supabase/migration/*.sql`
+- Documentation: Root `.md` files (STREAK_SYSTEM.md, TEST_SCENARIOS.md, etc.)

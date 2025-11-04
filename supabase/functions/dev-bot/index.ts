@@ -984,28 +984,34 @@ async function getSubscriptionInfo(dbUserId: number): Promise<any> {
 }
 /**
  * Проверка доступа к функциям (есть ли активная подписка)
+ * ОТКЛЮЧЕНО: Всегда возвращает true (доступ для всех)
  */
 async function checkSubscriptionAccess(dbUserId: number): Promise<boolean> {
+  // Проверка подписки отключена - всем пользователям доступны все функции
+  return true
+
+  /* ЗАКОММЕНТИРОВАНО - оригинальная логика проверки подписки
   try {
     const subscriptionData = await getSubscriptionInfo(dbUserId)
     const subscriptionInfo = Array.isArray(subscriptionData) ? subscriptionData[0] : subscriptionData
-    
+
     if (!subscriptionInfo) {
       return false
     }
-    
+
     // Проверяем, что подписка активна и не истекла
     if (subscriptionInfo.is_active && subscriptionInfo.expires_at) {
       const expiresAt = new Date(subscriptionInfo.expires_at)
       const now = new Date()
       return expiresAt > now
     }
-    
+
     return false
   } catch (error) {
     console.error('Error checking subscription access:', error)
     return false
   }
+  */
 }
 
 // ============================================
@@ -6118,10 +6124,10 @@ async function showSubscriptionMenu(chatId: number, dbUserId: number) {
     let keyboard: any[] = []
     
     if (!subscriptionInfo) {
-      statusText = `❌ **Подписка не активна**\n\nДля использования бота необходима активная подписка.`
-      statusEmoji = '❌'
+      // ИЗМЕНЕНО: Бесплатный доступ для всех
+      statusText = `✨ **Бесплатный доступ**\n\n🎉 Все функции бота доступны бесплатно!\n\nИспользуй все возможности без ограничений.`
+      statusEmoji = '✨'
       keyboard = [
-        [{ text: "💳 Купить подписку", callback_data: "buy_subscription" }],
         [{ text: "🔙 Назад", callback_data: "cancel_action" }]
       ]
     } else if (subscriptionInfo.is_unlimited) {
@@ -6151,16 +6157,12 @@ async function showSubscriptionMenu(chatId: number, dbUserId: number) {
         [{ text: "🔙 Назад", callback_data: "cancel_action" }]
       ]
     } else if (subscriptionInfo.needs_payment) {
-      // Подписка истекла
-      statusText = `⏰ **Подписка истекла**\n\n` +
-        `😔 Твоя подписка закончилась.\n\n` +
-        `Продли подписку, чтобы продолжить пользоваться всеми функциями бота:\n` +
-        `• 1 месяц — 129₽\n` +
-        `• 6 месяцев — 649₽ (выгодно!)\n` +
-        `• 1 год — 1099₽ (супер выгодно!)`
-      statusEmoji = '⏰'
+      // Подписка истекла - но доступ остается
+      statusText = `✨ **Бесплатный доступ**\n\n` +
+        `🎉 Все функции бота доступны бесплатно!\n\n` +
+        `Твоя предыдущая подписка закончилась, но ты можешь продолжать использовать бота без ограничений.`
+      statusEmoji = '✨'
       keyboard = [
-        [{ text: "💳 Продлить подписку", callback_data: "buy_subscription" }],
         [{ text: "🔙 Назад", callback_data: "cancel_action" }]
       ]
     } else {
